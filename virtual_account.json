@@ -1,0 +1,148 @@
+{
+    "balance": 10000.0,
+    "equity": 10000.0,
+    "positions": {},
+    "pending_orders": [
+        {
+            "symbol": "BTC/USDT",
+            "side": "LONG",
+            "price": 68587.5,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "LONG",
+            "price": 68673.75,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "LONG",
+            "price": 68760.0,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "LONG",
+            "price": 68846.25,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "LONG",
+            "price": 68932.5,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "SHORT",
+            "price": 69335.0,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "SHORT",
+            "price": 69651.25,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "SHORT",
+            "price": 69967.5,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "SHORT",
+            "price": 70283.75,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side": "SHORT",
+            "price": 70600.0,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "LONG",
+            "price": 1999.1341666666667,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "LONG",
+            "price": 2000.5775833333335,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "LONG",
+            "price": 2002.021,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "LONG",
+            "price": 2003.4644166666667,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "LONG",
+            "price": 2004.9078333333332,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "SHORT",
+            "price": 2030.8893333333333,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "SHORT",
+            "price": 2055.4274166666664,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "SHORT",
+            "price": 2079.9655,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "SHORT",
+            "price": 2104.503583333333,
+            "amount": 200.0,
+            "type": "grid"
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side": "SHORT",
+            "price": 2129.0416666666665,
+            "amount": 200.0,
+            "type": "grid"
+        }
+    ],
+    "history": []
+}

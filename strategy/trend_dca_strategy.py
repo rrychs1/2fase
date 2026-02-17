@@ -1,0 +1,170 @@
+import pandas as pd
+import logging
+from common.types import Side, SignalAction, Signal, DcaLevel, TrendPosition
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+class TrendDcaStrategy:
+    def __init__(self, config):
+        self.config = config
+
+    def generate_trend_signal(self, symbol: str, df: pd.DataFrame) -> Side:
+        """
+        Identify the current trend direction based on EMAs and MACD.
+        Returns Side.LONG, Side.SHORT, or None.
+        """
+        if df is None or len(df) < 5:
+            return None
+            
+        last_row = df.iloc[-1]
+        
+        # Check if indicators exist
+        if 'EMA_fast' not in df.columns or 'EMA_slow' not in df.columns or 'MACD' not in df.columns:
+            return None
+
+        # Bullish trend: EMA_fast > EMA_slow AND MACD > 0
+        if last_row['EMA_fast'] > last_row['EMA_slow'] and last_row['MACD'] > 0:
+            return Side.LONG
+        # Bearish trend: EMA_fast < EMA_slow AND MACD < 0
+        elif last_row['EMA_fast'] < last_row['EMA_slow'] and last_row['MACD'] < 0:
+            return Side.SHORT
+        
+        return None
+
+    def plan_dca_levels(self, entry_price: float, side: Side, total_amount: float) -> list[DcaLevel]:
+        """
+        Pre-calculate DCA levels based on entry price and steps.
+        Static 1.5% distance for simplicity, could be ATR-based.
+        """
+        levels = []
+        step_pct = 0.015 # 1.5% drop for DCA
+        amount_per_step = total_amount / (self.config.DCA_STEPS + 1)
+        
+        for i in range(1, self.config.DCA_STEPS + 1):
+            if side == Side.LONG:
+                price = entry_price * (1 - step_pct * i)
+            else:
+                price = entry_price * (1 + step_pct * i)
+            
+            levels.append(DcaLevel(price=price, amount=amount_per_step))
+        return levels
+
+    def calculate_sl_tp(self, entry_price: float, side: Side, atr: float):
+        """Calculate Stop Loss and Take Profit using ATR multiplier."""
+        if side == Side.LONG:
+            sl = entry_price - (atr * 2.5)
+            tp = entry_price + (atr * 4.0)
+        else:
+            sl = entry_price + (atr * 2.5)
+            tp = entry_price - (atr * 4.0)
+        return sl, tp
+
+    async def on_new_candle(self, symbol: str, market_state: dict) -> list[Signal]:
+        """
+        Core logic to generate signals on each candle.
+        """
+        df = market_state.get('df')
+        position_state = market_state.get('position')
+        equity = market_state.get('equity', 10000.0)
+        
+        signals = []
+        if df is None or len(df) < 20:
+            return signals
+
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+        trend = self.generate_trend_signal(symbol, df)
+        
+        # Current Price & Budget
+        current_price = last_row['close']
+        atr = last_row.get('ATR', 0.0)
+        total_amount = equity * 0.25 # Allocate 25% to this trend position (including DCA)
+
+        # 1. Logic for NEW Entries
+        if not position_state or not position_state.get('is_active', False):
+            if trend == Side.LONG:
+                # LONG Pullback
+                if prev_row['low'] <= last_row['EMA_fast'] and last_row['close'] > last_row['EMA_fast']:
+                    logger.info(f"[TrendDca] {symbol} Pullback LONG detected at {current_price}")
+                    sl, tp = self.calculate_sl_tp(current_price, Side.LONG, atr)
+                    
+                    dca_levels = self.plan_dca_levels(current_price, Side.LONG, total_amount)
+                    
+                    signals.append(Signal(
+                        symbol=symbol,
+                        action=SignalAction.ENTER_LONG,
+                        side=Side.LONG,
+                        price=current_price,
+                        stop_loss=sl,
+                        take_profit=tp,
+                        strategy="TrendDCA",
+                        confidence=0.8,
+                        meta={'dca_levels': [{'price': d.price, 'amount': d.amount, 'filled': False} for d in dca_levels]}
+                    ))
+                else:
+                    logger.info(f"[TrendDca] {symbol} Bullish trend. Waiting for pullback to {last_row['EMA_fast']:.2f}")
+
+            elif trend == Side.SHORT:
+                # SHORT Pullback
+                if prev_row['high'] >= last_row['EMA_fast'] and last_row['close'] < last_row['EMA_fast']:
+                    logger.info(f"[TrendDca] {symbol} Pullback SHORT detected at {current_price}")
+                    sl, tp = self.calculate_sl_tp(current_price, Side.SHORT, atr)
+                    
+                    dca_levels = self.plan_dca_levels(current_price, Side.SHORT, total_amount)
+                    
+                    signals.append(Signal(
+                        symbol=symbol,
+                        action=SignalAction.ENTER_SHORT,
+                        side=Side.SHORT,
+                        price=current_price,
+                        stop_loss=sl,
+                        take_profit=tp,
+                        strategy="TrendDCA",
+                        confidence=0.8,
+                        meta={'dca_levels': [{'price': d.price, 'amount': d.amount, 'filled': False} for d in dca_levels]}
+                    ))
+                else:
+                    logger.info(f"[TrendDca] {symbol} Bearish trend. Waiting for pullback to {last_row['EMA_fast']:.2f}")
+            else:
+                logger.info(f"[TrendDca] {symbol} No clear trend.")
+        
+        # 2. Logic for EXISTING Positions (Exit & DCA)
+        else:
+            side = position_state.get('side')
+            # Check for Exit (Already active in previous implementation)
+            if side == "LONG":
+                if current_price >= position_state.get('take_profit'):
+                    signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_LONG, side=Side.LONG, price=current_price, strategy="TrendDCA"))
+                elif current_price <= position_state.get('stop_loss'):
+                    signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_LONG, side=Side.LONG, price=current_price, strategy="TrendDCA"))
+                    
+                # Check DCA levels
+                dca_levels = position_state.get('dca_levels', [])
+                for level in dca_levels:
+                    if not level.get('filled', False) and current_price <= level['price']:
+                        logger.info(f"[TrendDca] {symbol} LONG DCA Level {level['price']} hit!")
+                        signals.append(Signal(
+                            symbol=symbol, action=SignalAction.DCA_ADD, side=Side.LONG, 
+                            price=level['price'], amount=level['amount'], strategy="TrendDCA"
+                        ))
+                        level['filled'] = True
+
+            elif side == "SHORT":
+                if current_price <= position_state.get('take_profit'):
+                    signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_SHORT, side=Side.SHORT, price=current_price, strategy="TrendDCA"))
+                elif current_price >= position_state.get('stop_loss'):
+                    signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_SHORT, side=Side.SHORT, price=current_price, strategy="TrendDCA"))
+
+                # Check DCA levels
+                dca_levels = position_state.get('dca_levels', [])
+                for level in dca_levels:
+                    if not level.get('filled', False) and current_price >= level['price']:
+                        logger.info(f"[TrendDca] {symbol} SHORT DCA Level {level['price']} hit!")
+                        signals.append(Signal(
+                            symbol=symbol, action=SignalAction.DCA_ADD, side=Side.SHORT, 
+                            price=level['price'], amount=level['amount'], strategy="TrendDCA"
+                        ))
+                        level['filled'] = True
+
+        return signals
