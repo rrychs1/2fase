@@ -1,7 +1,7 @@
 import requests
 
 def test_exchange_info():
-    url = "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
+    url = "https://demo-fapi.binance.com/fapi/v1/exchangeInfo"
     print(f"Testing {url}...")
     try:
         r = requests.get(url, timeout=10)

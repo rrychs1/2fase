@@ -33,7 +33,7 @@ async def debug_auth():
     # --- RAW NETWORK CHECK ---
     import requests
     try:
-        url = "https://testnet.binancefuture.com/fapi/v1/time"
+        url = "https://demo-fapi.binance.com/fapi/v1/time"
         log(f"Testing raw connectivity to {url}...")
         r = requests.get(url, timeout=5)
         log(f"[NETWORK] Status: {r.status_code}, Latency: {r.elapsed.total_seconds()}s")
@@ -53,15 +53,14 @@ async def debug_auth():
     
     try:
         if str(use_testnet).lower() == 'true':
-            log("[CONFIG] Enabling Testnet/Sandbox Mode")
-            exchange.set_sandbox_mode(True)
-            # Force URLs exactly as bot does
-            testnet_fapi = 'https://testnet.binancefuture.com/fapi/v1'
-            exchange.urls['api']['public'] = testnet_fapi
-            exchange.urls['api']['private'] = testnet_fapi
-            exchange.urls['api']['fapiPublic'] = testnet_fapi
-            exchange.urls['api']['fapiPrivate'] = testnet_fapi
-            log(f"[CONFIG] Overridden URLs to: {testnet_fapi}")
+            log("[CONFIG] Enabling Demo Trading Mode")
+            # Demo Trading URLs (replaces deprecated testnet/sandbox)
+            demo_fapi = 'https://demo-fapi.binance.com/fapi/v1'
+            exchange.urls['api']['public'] = demo_fapi
+            exchange.urls['api']['private'] = demo_fapi
+            exchange.urls['api']['fapiPublic'] = demo_fapi
+            exchange.urls['api']['fapiPrivate'] = demo_fapi
+            log(f"[CONFIG] Overridden URLs to: {demo_fapi}")
         
         log(f"[INFO] Fetching public time...")
         server_time = await exchange.fetch_time()

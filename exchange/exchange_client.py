@@ -32,7 +32,7 @@ class ExchangeClient:
         """Direct REST fallback to bypass CCXT market loading overhead."""
         base_url = "https://fapi.binance.com/fapi/v1/klines"
         if Config.USE_TESTNET:
-            base_url = "https://testnet.binancefuture.com/fapi/v1/klines"
+            base_url = "https://demo-fapi.binance.com/fapi/v1/klines"
             
         # Symbol format BTC/USDT -> BTCUSDT
         clean_symbol = symbol.replace("/", "")
@@ -54,21 +54,6 @@ class ExchangeClient:
             logger.error(f"Fallback OHLCV exception for {symbol}: {e}")
         return []
 
-    def _initialize_clients(self):
-        # Authenticated Client config
-        config = {
-            'apiKey': Config.BINANCE_API_KEY,
-            'secret': Config.BINANCE_SECRET_KEY,
-            'enableRateLimit': True,
-        }
-        
-        self.exchange = ccxt.binanceusdm(config)
-        
-        # Public Client config
-        public_config = {
-            'enableRateLimit': True,
-        }
-        self.public_exchange = ccxt.binanceusdm(public_config)
 
     def _initialize_clients(self):
         # Authenticated Client config
@@ -87,16 +72,15 @@ class ExchangeClient:
         self.public_exchange = ccxt.binanceusdm(public_config)
 
         if Config.USE_TESTNET:
-            testnet_fapi = 'https://testnet.binancefuture.com/fapi/v1'
+            demo_fapi = 'https://demo-fapi.binance.com/fapi/v1'
             for client in [self.exchange, self.public_exchange]:
-                client.set_sandbox_mode(True)
-                # Hardcore override to ensure fapi endpoint is used
-                client.urls['api']['public'] = testnet_fapi
-                client.urls['api']['private'] = testnet_fapi
-                client.urls['api']['fapiPublic'] = testnet_fapi
-                client.urls['api']['fapiPrivate'] = testnet_fapi
+                # Override URLs to Binance Demo Trading (replaces deprecated testnet)
+                client.urls['api']['public'] = demo_fapi
+                client.urls['api']['private'] = demo_fapi
+                client.urls['api']['fapiPublic'] = demo_fapi
+                client.urls['api']['fapiPrivate'] = demo_fapi
             
-            logger.info("Sandbox mode enabled with fapi overrides.")
+            logger.info("Demo Trading mode enabled with fapi overrides.")
 
     async def init(self):
         """Initialize and load markets asynchronously with manual fallback."""
@@ -115,7 +99,7 @@ class ExchangeClient:
         """Manually fetch and inject market info to satisfy CCXT's precision requirements."""
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         if Config.USE_TESTNET:
-            url = "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
+            url = "https://demo-fapi.binance.com/fapi/v1/exchangeInfo"
         
         try:
             r = requests.get(url, timeout=10)
@@ -213,7 +197,7 @@ class ExchangeClient:
         """Low-level signed request to fetch positions."""
         base_url = "https://fapi.binance.com"
         if Config.USE_TESTNET:
-            base_url = "https://testnet.binancefuture.com"
+            base_url = "https://demo-fapi.binance.com"
         
         endpoint = "/fapi/v2/positionRisk"
         timestamp = int(time.time() * 1000)
@@ -276,7 +260,7 @@ class ExchangeClient:
         """Low-level signed request to fetch balance without depending on CCXT market loading."""
         base_url = "https://fapi.binance.com"
         if Config.USE_TESTNET:
-            base_url = "https://testnet.binancefuture.com"
+            base_url = "https://demo-fapi.binance.com"
         
         endpoint = "/fapi/v2/balance"
         timestamp = int(time.time() * 1000)
@@ -335,7 +319,7 @@ class ExchangeClient:
         """Low-level signed POST request to place an order."""
         base_url = "https://fapi.binance.com"
         if Config.USE_TESTNET:
-            base_url = "https://testnet.binancefuture.com"
+            base_url = "https://demo-fapi.binance.com"
         
         endpoint = "/fapi/v1/order"
         timestamp = int(time.time() * 1000)
