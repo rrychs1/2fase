@@ -13,3 +13,4 @@ aiohttp==3.9.1
 asyncio==3.4.3
 flask==3.0.0
 pytest==8.0.0
+supervisor==4.2.5

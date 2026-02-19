@@ -46,6 +46,8 @@ class BotRunner:
         self.current_regimes = {}
         self.current_prices = {}
         self.current_positions = {}
+        self.current_orders = []
+        self.current_history = []
         self.update_status("Initialized")
 
     async def run(self):
@@ -86,6 +88,8 @@ class BotRunner:
         current_prices = {}
         self.current_regimes = {}
         self.current_positions = {}
+        self.current_orders = []
+        self.current_history = []
         # 0. Fetch latest prices for all symbols first to accurately estimate equity/risk
         for symbol in self.config.SYMBOLS:
             df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID)
@@ -167,6 +171,14 @@ class BotRunner:
                 'position': position
             }
             signals = await self.router.route_signals(symbol, regime, market_state)
+            
+            # Track Orders and History in Live Mode
+            if not self.config.ANALYSIS_ONLY:
+                symbol_orders = await self.exchange.fetch_open_orders(symbol)
+                self.current_orders.extend(symbol_orders)
+                
+                symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=20)
+                self.current_history.extend(symbol_trades)
             
             # Notify for Grid Initialization (Batched)
             grid_init_signals = [s for s in signals if s.strategy == "GridInitial"]
@@ -307,8 +319,12 @@ class BotRunner:
             else:
                 balance = equity - unrealized_pnl
                 positions = self.current_positions
-                pending = []  # Live orders are on exchange, not local
-                history = []
+                pending = self.current_orders
+                history = self.current_history
+
+            # Sort history by date descending
+            if history:
+                history = sorted(history, key=lambda x: str(x.get('closed_at', '')), reverse=True)
 
             state = {
                 "balance": round(balance, 2),

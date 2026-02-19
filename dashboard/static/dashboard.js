@@ -17,6 +17,35 @@ async function fetchJSON(url) {
     }
 }
 
+// ─────────────────────────── Animations ──────────────────────
+function animateValue(id, start, end, duration, isCurrency = true) {
+    const obj = document.getElementById(id);
+    if (!obj) return;
+
+    // Skip animation if values are the same
+    const currentVal = parseFloat(obj.getAttribute('data-value') || '0');
+    if (Math.abs(currentVal - end) < 0.01) return;
+    obj.setAttribute('data-value', end);
+
+    let startTimestamp = null;
+    const step = (timestamp) => {
+        if (!startTimestamp) startTimestamp = timestamp;
+        const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+        const val = progress * (end - start) + start;
+
+        if (isCurrency) {
+            obj.textContent = `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        } else {
+            obj.textContent = Math.floor(val).toLocaleString();
+        }
+
+        if (progress < 1) {
+            window.requestAnimationFrame(step);
+        }
+    };
+    window.requestAnimationFrame(step);
+}
+
 // ─────────────────────────── Status header ───────────────────
 function renderStatus(data) {
     const badge = document.getElementById('status-badge');
@@ -45,7 +74,18 @@ function renderStatus(data) {
 function renderKPIs(data) {
     if (!data) return;
 
-    const setKPI = (id, value, cssClass = '') => {
+    const balance = data.balance || 0;
+    const equity = data.equity || balance;
+    const unrealizedPnL = equity - balance;
+    const totalPnL = data.total_pnl || 0;
+
+    // Use animated counting for main metrics
+    animateValue('kpi-balance', parseFloat(document.getElementById('kpi-balance')?.getAttribute('data-value') || '0'), balance, 800);
+    animateValue('kpi-equity', parseFloat(document.getElementById('kpi-equity')?.getAttribute('data-value') || '0'), equity, 800);
+    animateValue('kpi-total-pnl', parseFloat(document.getElementById('kpi-total-pnl')?.getAttribute('data-value') || '0'), totalPnL, 800);
+
+    // Static updates for smaller metrics
+    const setStat = (id, value, cssClass = '') => {
         const el = document.getElementById(id);
         if (el) {
             el.textContent = value;
@@ -53,21 +93,15 @@ function renderKPIs(data) {
         }
     };
 
-    const balance = data.balance || 0;
-    const equity = data.equity || balance;
-    const unrealizedPnL = equity - balance;
-    const totalPnL = data.total_pnl || 0;
-
-    setKPI('kpi-balance', `$${balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 'neutral');
-    setKPI('kpi-equity', `$${equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+    setStat('kpi-unrealized', `${unrealizedPnL >= 0 ? '+' : ''}$${unrealizedPnL.toFixed(2)}`,
         unrealizedPnL >= 0 ? 'positive' : 'negative');
-    setKPI('kpi-unrealized', `${unrealizedPnL >= 0 ? '+' : ''}$${unrealizedPnL.toFixed(2)}`,
-        unrealizedPnL >= 0 ? 'positive' : 'negative');
-    setKPI('kpi-trades', data.total_trades || 0, 'neutral');
-    setKPI('kpi-winrate', `${data.win_rate || 0}%`,
+    setStat('kpi-trades', data.total_trades || 0, 'neutral');
+    setStat('kpi-winrate', `${data.win_rate || 0}%`,
         (data.win_rate || 0) >= 50 ? 'positive' : (data.win_rate > 0 ? 'negative' : 'neutral'));
-    setKPI('kpi-total-pnl', `${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`,
-        totalPnL >= 0 ? 'positive' : 'negative');
+
+    // Update color for equity and PnL
+    document.getElementById('kpi-equity').className = `kpi-value ${unrealizedPnL >= 0 ? 'positive' : 'negative'}`;
+    document.getElementById('kpi-total-pnl').className = `kpi-value ${totalPnL >= 0 ? 'positive' : 'negative'}`;
 }
 
 // ─────────────────────────── Equity Chart ────────────────────

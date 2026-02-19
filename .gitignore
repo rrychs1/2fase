@@ -43,10 +43,8 @@ debug_result.txt
 analysis_results.txt
 backtest_error.txt
 log_analysis_report.txt
-debug_result.txt
 pytest.ini
 .pytest_cache/
-.agent/
 
 # OS
 .DS_Store

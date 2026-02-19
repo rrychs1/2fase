@@ -6,6 +6,7 @@ import pandas as pd
 import hmac
 import hashlib
 import time
+from datetime import datetime
 from config.config_loader import Config
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,46 @@ class ExchangeClient:
             logger.error(f"Fallback OHLCV exception for {symbol}: {e}")
         return []
 
+
+    def _manual_request(self, method, endpoint, params=None):
+        """Unified signed request helper for Testnet/Live manual fallbacks."""
+        base_url = "https://demo-fapi.binance.com" if Config.USE_TESTNET else "https://fapi.binance.com"
+        timestamp = int(time.time() * 1000)
+        
+        payload = {'timestamp': timestamp, 'recvWindow': 10000}
+        if params:
+            payload.update(params)
+            
+        # Build query string
+        query_parts = []
+        for k in sorted(payload.keys()):
+            query_parts.append(f"{k}={payload[k]}")
+        query_string = "&".join(query_parts)
+        
+        signature = hmac.new(
+            self.exchange.secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
+        headers = {'X-MBX-APIKEY': self.exchange.apiKey}
+        
+        try:
+            full_timeout = 30 # High timeout for Testnet slowness
+            if method.upper() == 'GET':
+                r = requests.get(url, headers=headers, timeout=full_timeout)
+            else:
+                r = requests.post(url, headers=headers, timeout=full_timeout)
+                
+            if r.status_code == 200:
+                return r.json()
+            else:
+                logger.error(f"Manual {method} {endpoint} failed: {r.status_code} {r.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Manual {method} {endpoint} exception: {e}")
+            return None
 
     def _initialize_clients(self):
         # Authenticated Client config
@@ -112,7 +153,11 @@ class ExchangeClient:
                 data = r.json()
                 markets = {}
                 for s in data['symbols']:
-                    symbol_id = s['symbol'] # BTCUSDT
+                    # Focus ONLY on Perpetual Swaps to avoid symbol collisions with quarterly/delivery
+                    if s.get('contractType') != 'PERPETUAL':
+                        continue
+                        
+                    symbol_id = s['symbol'] # e.g. BTCUSDT
                     base = s['baseAsset']
                     quote = s['quoteAsset']
                     ccxt_symbol = f"{base}/{quote}"
@@ -173,12 +218,94 @@ class ExchangeClient:
         if self.public_exchange: await self.public_exchange.close()
 
     async def fetch_open_orders(self, symbol=None):
+        if Config.USE_TESTNET:
+            return await self._manual_fetch_open_orders(symbol)
         try:
-            clean_symbol = symbol.replace("/", "") if symbol else None
-            return await self.exchange.fetch_open_orders(clean_symbol)
+            orders = await self.exchange.fetch_open_orders(symbol)
+            return self._normalize_orders(orders)
         except Exception as e:
             logger.error(f"Error fetching open orders: {e}")
             return []
+
+    async def fetch_my_trades(self, symbol, limit=50):
+        if Config.USE_TESTNET:
+            return await self._manual_fetch_my_trades(symbol, limit)
+        try:
+            trades = await self.exchange.fetch_my_trades(symbol, limit=limit)
+            return self._normalize_trades(trades)
+        except Exception as e:
+            logger.error(f"Error fetching trades for {symbol}: {e}")
+            return []
+
+    def _normalize_orders(self, orders):
+        normalized = []
+        for o in orders:
+            normalized.append({
+                "symbol": o.get("symbol"),
+                "side": o.get("side", "").upper(),
+                "price": float(o.get("price") or o.get("stopPrice") or 0),
+                "type": o.get("type", "limit").upper(),
+                "amount": float(o.get("amount", 0)),
+                "id": o.get("id")
+            })
+        return normalized
+
+    def _normalize_trades(self, trades):
+        normalized = []
+        for t in trades:
+            normalized.append({
+                "symbol": t.get("symbol"),
+                "side": t.get("side", "").upper(),
+                "price": float(t.get("price", 0)),
+                "amount": float(t.get("amount", 0)),
+                "pnl": float(t.get("info", {}).get("realizedPnl", 0)),
+                "closed_at": t.get("datetime")
+            })
+        return normalized
+
+    async def _manual_fetch_open_orders(self, symbol=None):
+        params = {}
+        if symbol:
+            params['symbol'] = symbol.replace("/", "")
+            
+        orders = self._manual_request('GET', "/fapi/v1/openOrders", params)
+        if not orders: return []
+        
+        normalized = []
+        for o in orders:
+            sym_id = o['symbol']
+            ccxt_sym = sym_id
+            if self.exchange.markets:
+                for s, info in self.exchange.markets.items():
+                    if info.get('id') == sym_id:
+                        ccxt_sym = s; break
+            
+            normalized.append({
+                "symbol": ccxt_sym,
+                "side": o.get('side', '').upper(),
+                "price": float(o.get('price', 0) or o.get('stopPrice', 0)),
+                "type": o.get('type', '').upper(),
+                "amount": float(o.get('origQty', 0)),
+                "id": o.get('orderId')
+            })
+        return normalized
+
+    async def _manual_fetch_my_trades(self, symbol, limit=50):
+        params = {'symbol': symbol.replace("/", ""), 'limit': limit}
+        trades = self._manual_request('GET', "/fapi/v1/userTrades", params)
+        if not trades: return []
+        
+        normalized = []
+        for t in trades:
+            normalized.append({
+                "symbol": symbol,
+                "side": "BUY" if t.get('side', '').upper() == 'BUY' else "SELL",
+                "price": float(t.get('price', 0)),
+                "amount": float(t.get('qty', 0)),
+                "pnl": float(t.get('realizedPnl', 0)),
+                "closed_at": datetime.fromtimestamp(t.get('time', 0)/1000).isoformat()
+            })
+        return normalized
 
     async def cancel_all_orders(self, symbol):
         try:
@@ -199,58 +326,28 @@ class ExchangeClient:
             return await self._manual_fetch_positions()
 
     async def _manual_fetch_positions(self):
-        """Low-level signed request to fetch positions."""
-        base_url = "https://fapi.binance.com"
-        if Config.USE_TESTNET:
-            base_url = "https://demo-fapi.binance.com"
+        data = self._manual_request('GET', "/fapi/v2/positionRisk")
+        if not data: return []
         
-        endpoint = "/fapi/v2/positionRisk"
-        timestamp = int(time.time() * 1000)
-        query_string = f"timestamp={timestamp}"
-        
-        signature = hmac.new(
-            self.exchange.secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
-        headers = {'X-MBX-APIKEY': self.exchange.apiKey}
-        
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                active = []
-                for p in data:
-                    # Binance returns symbol strings like 'BTCUSDT'
-                    # We need to normalize back to CCXT style 'BTC/USDT' if possible
-                    # but for now we filter by contracts
-                    if float(p.get('positionAmt', 0)) != 0:
-                        # Dynamic mapping from symbols loaded in init()
-                        symbol_id = p['symbol']
-                        ccxt_sym = symbol_id
-                        # Try to find the CCXT symbol (e.g. BTC/USDT) from the API ID (BTCUSDT)
-                        if self.exchange.markets:
-                            for sym, info in self.exchange.markets.items():
-                                if info.get('id') == symbol_id:
-                                    ccxt_sym = sym
-                                    break
-                        
-                        active.append({
-                            'symbol': ccxt_sym,
-                            'contracts': float(p['positionAmt']),
-                            'entryPrice': float(p['entryPrice']),
-                            'unrealizedPnl': float(p['unRealizedProfit']),
-                            'leverage': int(p['leverage']),
-                            'info': p
-                        })
-                return active
-            else:
-                logger.error(f"Manual positions fetch failed: {r.status_code}")
-        except Exception as e:
-            logger.error(f"Manual positions fetch exception: {e}")
-        return []
+        active = []
+        for p in data:
+            if float(p.get('positionAmt', 0)) != 0:
+                symbol_id = p['symbol']
+                ccxt_sym = symbol_id
+                if self.exchange.markets:
+                    for sym, info in self.exchange.markets.items():
+                        if info.get('id') == symbol_id:
+                            ccxt_sym = sym; break
+                
+                active.append({
+                    'symbol': ccxt_sym,
+                    'contracts': float(p['positionAmt']),
+                    'entryPrice': float(p['entryPrice']),
+                    'unrealizedPnl': float(p['unRealizedProfit']),
+                    'leverage': int(p['leverage']),
+                    'info': p
+                })
+        return active
 
     async def fetch_balance(self):
         """Fetch balance with multiple fallbacks, including a direct API request."""
@@ -264,41 +361,18 @@ class ExchangeClient:
             return await self._manual_fetch_balance()
 
     async def _manual_fetch_balance(self):
-        """Low-level signed request to fetch balance without depending on CCXT market loading."""
-        base_url = "https://fapi.binance.com"
-        if Config.USE_TESTNET:
-            base_url = "https://demo-fapi.binance.com"
+        data = self._manual_request('GET', "/fapi/v2/balance")
+        if not data: return {'total': {'USDT': 0.0}, 'info': {}}
         
-        endpoint = "/fapi/v2/balance"
-        timestamp = int(time.time() * 1000)
-        query_string = f"timestamp={timestamp}"
-        
-        signature = hmac.new(
-            self.exchange.secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
-        headers = {'X-MBX-APIKEY': self.exchange.apiKey}
-        
-        try:
-            # We use asyncio + requests (could use aiohttp but requests is already here)
-            # For a bot iteration, a blocking request is acceptable as long as it has a timeout.
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                total_usdt = 0.0
-                for b in data:
-                    if b.get('asset') == 'USDT':
-                        total_usdt = float(b.get('balance', 0))
-                        break
-                return {'total': {'USDT': total_usdt}, 'info': data}
-            else:
-                logger.error(f"Manual balance fetch failed: {r.status_code} {r.text}")
-        except Exception as e:
-            logger.error(f"Manual balance fetch exception: {e}")
-        
+        for asset in data:
+            if asset.get('asset') == 'USDT':
+                total = float(asset.get('balance', 0))
+                free = float(asset.get('withdrawAvailable') or asset.get('availableBalance') or 0)
+                return {
+                    'total': {'USDT': total},
+                    'free': {'USDT': free},
+                    'info': asset
+                }
         return {'total': {'USDT': 0.0}, 'info': {}}
 
     async def create_order(self, symbol, type, side, amount, price=None, params=None):
