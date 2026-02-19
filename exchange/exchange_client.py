@@ -72,15 +72,20 @@ class ExchangeClient:
         self.public_exchange = ccxt.binanceusdm(public_config)
 
         if Config.USE_TESTNET:
-            demo_fapi = 'https://demo-fapi.binance.com/fapi/v1'
+            demo_base = 'https://demo-fapi.binance.com'
             for client in [self.exchange, self.public_exchange]:
-                # Override URLs to Binance Demo Trading (replaces deprecated testnet)
-                client.urls['api']['public'] = demo_fapi
-                client.urls['api']['private'] = demo_fapi
-                client.urls['api']['fapiPublic'] = demo_fapi
-                client.urls['api']['fapiPrivate'] = demo_fapi
+                # Override ALL fapi URL keys to Binance Demo Trading
+                client.urls['api']['fapiPublic'] = f'{demo_base}/fapi/v1'
+                client.urls['api']['fapiPublicV2'] = f'{demo_base}/fapi/v2'
+                client.urls['api']['fapiPublicV3'] = f'{demo_base}/fapi/v3'
+                client.urls['api']['fapiPrivate'] = f'{demo_base}/fapi/v1'
+                client.urls['api']['fapiPrivateV2'] = f'{demo_base}/fapi/v2'
+                client.urls['api']['fapiPrivateV3'] = f'{demo_base}/fapi/v3'
+                client.urls['api']['fapiData'] = f'{demo_base}/futures/data'
+                client.urls['api']['public'] = f'{demo_base}/fapi/v1'
+                client.urls['api']['private'] = f'{demo_base}/fapi/v1'
             
-            logger.info("Demo Trading mode enabled with fapi overrides.")
+            logger.info("Demo Trading mode enabled with full fapi overrides.")
 
     async def init(self):
         """Initialize and load markets asynchronously with manual fallback."""
@@ -249,8 +254,10 @@ class ExchangeClient:
 
     async def fetch_balance(self):
         """Fetch balance with multiple fallbacks, including a direct API request."""
+        if Config.USE_TESTNET:
+            # Skip CCXT on Demo Trading — go straight to manual for reliability
+            return await self._manual_fetch_balance()
         try:
-            # Try CCXT first
             return await self.exchange.fetch_balance()
         except Exception as e:
             logger.warning(f"CCXT fetch_balance failed: {e}. Attempting manual fetch.")
@@ -376,11 +383,52 @@ class ExchangeClient:
             return None
 
     async def set_leverage(self, symbol, leverage):
+        """Set leverage with manual fallback for Demo Trading."""
+        if Config.USE_TESTNET:
+            return await self._manual_set_leverage(symbol, leverage)
         try:
-            # We use the unified symbol because manual markets are keyed by it
             return await self.exchange.set_leverage(leverage, symbol)
         except Exception as e:
             logger.error(f"Set leverage error for {symbol}: {e}")
+            return await self._manual_set_leverage(symbol, leverage)
+
+    async def _manual_set_leverage(self, symbol, leverage):
+        """Low-level signed POST to set leverage on Demo Trading."""
+        base_url = "https://fapi.binance.com"
+        if Config.USE_TESTNET:
+            base_url = "https://demo-fapi.binance.com"
+        
+        endpoint = "/fapi/v1/leverage"
+        clean_symbol = symbol.replace("/", "")
+        timestamp = int(time.time() * 1000)
+        
+        payload = {
+            'symbol': clean_symbol,
+            'leverage': leverage,
+            'timestamp': timestamp,
+            'recvWindow': 5000
+        }
+        
+        query_string = "&".join([f"{k}={v}" for k, v in sorted(payload.items())])
+        signature = hmac.new(
+            self.exchange.secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
+        headers = {'X-MBX-APIKEY': self.exchange.apiKey}
+        
+        try:
+            r = requests.post(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                logger.info(f"Leverage set to {leverage}x for {symbol}")
+                return r.json()
+            else:
+                logger.warning(f"Set leverage failed for {symbol}: {r.status_code} {r.text}")
+        except Exception as e:
+            logger.warning(f"Set leverage exception for {symbol}: {e}")
+        return None
 
     def amount_to_precision(self, symbol, amount):
         try:
