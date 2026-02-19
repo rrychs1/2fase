@@ -1,48 +1,126 @@
 ---
-description: Guía paso a paso para desplegar el bot en la nube (AWS/DigitalOcean)
+description: Guia paso a paso para desplegar el bot + dashboard en DigitalOcean
 ---
 
-# Despliegue del Bot en la Nube
+# Despliegue del Bot + Dashboard en DigitalOcean
 
-Para que el bot funcione 24/7 de forma profesional, sigue estos pasos:
+## Prerequisitos
+- Cuenta de DigitalOcean (usa tu GitHub Student Pack para $200 de credito)
+- Repositorio del bot subido a GitHub
 
-## 1. Preparación del Servidor (VPS)
-Recomiendo una instancia **Ubuntu 22.04 LTS** con al menos 1GB de RAM.
+## 1. Crear Droplet
 
-### Instalar Docker (Ejecutar en la terminal del servidor):
+1. Ve a [cloud.digitalocean.com](https://cloud.digitalocean.com)
+2. Crea un **Droplet**:
+   - **OS**: Ubuntu 22.04 LTS
+   - **Plan**: Basic $6/mes (1 vCPU, 1GB RAM) — suficiente para el bot
+   - **Region**: New York o la mas cercana
+   - **Autenticacion**: SSH Key (recomendado) o Password
+
+## 2. Conectarse al Servidor
+
 ```bash
-sudo apt update && sudo apt install -y docker.io docker-compose
-sudo systemctl start docker
-sudo systemctl enable docker
+ssh root@<TU_DROPLET_IP>
 ```
 
-## 2. Configuración del Bot
-1. Sube tu código al servidor (usando Git o SCP).
-2. Crea el archivo `.env` en la raíz del proyecto usando `nano .env`:
-   - Copia el contenido de `.env.production`.
-   - **IMPORTANTE**: Pon tus Claves Reales y asegúrate de que `USE_TESTNET=False`.
+## 3. Instalar Docker
 
-## 3. Ejecución Continua
-Para que el bot no se detenga si cierras la sesión:
-
-### Opción A: Usando Docker (Recomendado)
+// turbo
 ```bash
-# Construir la imagen
+sudo apt update && sudo apt install -y docker.io
+sudo systemctl start docker && sudo systemctl enable docker
+```
+
+## 4. Clonar Repositorio
+
+```bash
+cd /opt
+git clone https://github.com/<TU_USUARIO>/<TU_REPO>.git trading-bot
+cd trading-bot
+```
+
+## 5. Crear Archivo .env
+
+```bash
+nano .env
+```
+
+Pegar el contenido (usa tus credenciales reales):
+```env
+BINANCE_API_KEY=tu_api_key
+BINANCE_SECRET_KEY=tu_secret_key
+USE_TESTNET=True
+ANALYSIS_ONLY=False
+SYMBOLS=BTC/USDT,ETH/USDT
+LEVERAGE=3
+POLLING_INTERVAL=60
+TELEGRAM_BOT_TOKEN=tu_token
+TELEGRAM_CHAT_ID=tu_chat_id
+```
+
+## 6. Construir y Ejecutar
+
+// turbo
+```bash
 docker build -t trading-bot .
-
-# Ejecutar en segundo plano con autoreinicio
-docker run -d --name binance-bot --restart always --env-file .env trading-bot
 ```
 
-### Opción B: Ver Logs
 ```bash
-docker logs -f binance-bot
+docker run -d \
+  --name binance-bot \
+  --restart always \
+  --env-file .env \
+  -p 5050:5050 \
+  -v /opt/trading-bot/logs:/app/logs \
+  -v /opt/trading-bot/data:/app/data \
+  trading-bot
 ```
 
-## 4. Seguridad en Binance
-1. En la configuración de tu API en Binance:
-   - Activa "Restrict access to trusted IPs only".
-   - Pega la **IP Pública** de tu servidor Cloud.
-   - Activa "Enable Futures".
-   
-¡Tu bot ya está listo para operar en el mercado real!
+## 7. Verificar
+
+// turbo
+```bash
+# Ver logs del bot
+docker logs -f binance-bot
+
+# Ver estado
+docker ps
+
+# Acceder al dashboard
+# Abre en tu navegador: http://<TU_DROPLET_IP>:5050
+```
+
+## 8. Configurar Firewall
+
+```bash
+ufw allow 22     # SSH
+ufw allow 5050   # Dashboard
+ufw enable
+```
+
+## 9. Seguridad en Binance
+
+1. En la configuracion de tu API en Binance:
+   - Activa "Restrict access to trusted IPs only"
+   - Pega la **IP Publica** de tu Droplet
+   - Activa "Enable Futures"
+
+## Comandos Utiles
+
+```bash
+# Reiniciar bot
+docker restart binance-bot
+
+# Detener bot
+docker stop binance-bot
+
+# Ver logs en tiempo real
+docker logs -f --tail 100 binance-bot
+
+# Actualizar codigo
+cd /opt/trading-bot
+git pull
+docker build -t trading-bot .
+docker stop binance-bot && docker rm binance-bot
+# Volver a ejecutar el comando del paso 6
+```

@@ -41,7 +41,7 @@ cp .env.example .env
 ### 5️⃣ Verificar claves (1 min)
 ```bash
 python verify_keys.py
-# Deberías ver: "¡ÉXITO en Testnet!"
+# Deberías ver: "✅ ¡ÉXITO! Conexión verificada correctamente en Testnet."
 ```
 
 ### 6️⃣ Arrancar el bot (1 min)

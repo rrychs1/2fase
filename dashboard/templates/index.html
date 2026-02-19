@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <meta name="description" content="Real-time monitoring dashboard for the Binance Futures Trading Bot">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+
+<body>
+    <div id="refresh-bar" class="refresh-bar"></div>
+
+    <div class="dashboard">
+
+        <!-- ═══ Header ═══ -->
+        <header class="header">
+            <div class="header-left">
+                <h1>Trading Bot</h1>
+                <div id="status-badge" class="status-badge offline">
+                    <span class="status-dot"></span> Loading...
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="header-meta">
+                    <div>Uptime: <strong id="uptime">--</strong></div>
+                    <div>Mode: <strong id="mode">--</strong></div>
+                    <div>Last loop: <strong id="last-loop">--</strong></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- ═══ KPI Cards ═══ -->
+        <section class="kpi-grid">
+            <div class="card kpi-card">
+                <div id="kpi-balance" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Balance</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-equity" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Equity</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-unrealized" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Unrealized PnL</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-total-pnl" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Total PnL</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-trades" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Total Trades</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-winrate" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Win Rate</div>
+            </div>
+        </section>
+
+        <!-- ═══ Equity Chart ═══ -->
+        <section class="chart-grid">
+            <div class="card">
+                <div class="card-title"><span class="icon">📈</span> Equity Curve</div>
+                <div class="chart-container">
+                    <canvas id="equity-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Regime Info ═══ -->
+        <section style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🔄</span> Current Regime</div>
+                <div id="regime-info" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span class="empty-state">Waiting for data...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Tables ═══ -->
+        <section class="tables-grid">
+            <!-- Positions -->
+            <div class="card">
+                <div class="card-title"><span class="icon">💼</span> Open Positions</div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Avg Price</th>
+                                <th>Amount</th>
+                                <th>SL / TP</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <tr>
+                                <td colspan="5" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Pending Orders -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">📋</span> Pending Orders
+                    <span style="margin-left:auto;font-size:0.85rem;color:var(--text-muted);" id="orders-count">0</span>
+                </div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Price</th>
+                                <th>Type</th>
+                            </tr>
+                        </thead>
+                        <tbody id="orders-body">
+                            <tr>
+                                <td colspan="4" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recent Trades -->
+        <section style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🔁</span> Recent Trades</div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>PnL</th>
+                                <th>Closed At</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-body">
+                            <tr>
+                                <td colspan="4" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Log Viewer ═══ -->
+        <section>
+            <div class="card">
+                <div class="card-title"><span class="icon">🖥️</span> Live Log</div>
+                <div id="log-viewer" class="log-viewer">
+                    <div class="log-line">Connecting...</div>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+
+</html>

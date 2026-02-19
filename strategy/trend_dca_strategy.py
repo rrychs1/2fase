@@ -134,9 +134,11 @@ class TrendDcaStrategy:
             side = position_state.get('side')
             # Check for Exit (Already active in previous implementation)
             if side == "LONG":
-                if current_price >= position_state.get('take_profit'):
+                tp = position_state.get('take_profit')
+                sl = position_state.get('stop_loss')
+                if tp is not None and current_price >= tp:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_LONG, side=Side.LONG, price=current_price, strategy="TrendDCA"))
-                elif current_price <= position_state.get('stop_loss'):
+                elif sl is not None and current_price <= sl:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_LONG, side=Side.LONG, price=current_price, strategy="TrendDCA"))
                     
                 # Check DCA levels
@@ -151,9 +153,11 @@ class TrendDcaStrategy:
                         level['filled'] = True
 
             elif side == "SHORT":
-                if current_price <= position_state.get('take_profit'):
+                tp = position_state.get('take_profit')
+                sl = position_state.get('stop_loss')
+                if tp is not None and current_price <= tp:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_SHORT, side=Side.SHORT, price=current_price, strategy="TrendDCA"))
-                elif current_price >= position_state.get('stop_loss'):
+                elif sl is not None and current_price >= sl:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_SHORT, side=Side.SHORT, price=current_price, strategy="TrendDCA"))
 
                 # Check DCA levels

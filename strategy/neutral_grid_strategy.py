@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import time
 from common.types import Side, SignalAction, Signal, GridLevel, GridState, VolumeProfile
 from typing import List
 
@@ -10,6 +11,8 @@ class NeutralGridStrategy:
     def __init__(self, config):
         self.config = config
         self.grid_states: dict[str, GridState] = {} # symbol -> GridState
+        self.last_rebuild_time: dict[str, float] = {}
+        self.consecutive_outside: dict[str, int] = {}
 
     def generate_grid_levels(self, symbol: str, vp: VolumeProfile, total_amount: float) -> List[GridLevel]:
         """
@@ -50,10 +53,27 @@ class NeutralGridStrategy:
         rebuild_needed = False
         if not state or not state.is_active:
             rebuild_needed = True
+            self.consecutive_outside[symbol] = 0
         elif current_price > vp.vah or current_price < vp.val:
-            # Price escaped the value area
-            logger.info(f"[Grid] {symbol} Price {current_price:.2f} outside Value Area ({vp.val:.2f} - {vp.vah:.2f}). Rebuild needed.")
-            rebuild_needed = True
+            # Track consecutive out-of-range checks
+            self.consecutive_outside[symbol] = self.consecutive_outside.get(symbol, 0) + 1
+            
+            if self.consecutive_outside[symbol] >= 2:
+                # Check cooldown (10 minutes)
+                now = time.time()
+                last_rebuild = self.last_rebuild_time.get(symbol, 0)
+                if now - last_rebuild > 600:  # 10 min cooldown
+                    logger.info(f"[Grid] {symbol} Price {current_price:.2f} outside Value Area "
+                               f"({vp.val:.2f} - {vp.vah:.2f}) for {self.consecutive_outside[symbol]} checks. Rebuilding.")
+                    rebuild_needed = True
+                else:
+                    remaining = int(600 - (now - last_rebuild))
+                    logger.info(f"[Grid] {symbol} Rebuild on cooldown ({remaining}s remaining)")
+            else:
+                logger.info(f"[Grid] {symbol} Price outside VA ({self.consecutive_outside[symbol]}/2 checks)")
+        else:
+            # Price is back inside Value Area, reset counter
+            self.consecutive_outside[symbol] = 0
 
         if rebuild_needed:
             # Logic to cancel old grid and place new one
@@ -66,6 +86,8 @@ class NeutralGridStrategy:
                 levels=new_levels,
                 poc=vp.poc, vah=vp.vah, val=vp.val, is_active=True
             )
+            self.last_rebuild_time[symbol] = time.time()
+            self.consecutive_outside[symbol] = 0
             
             # Emit signals for all new levels
             for level in new_levels:
@@ -80,21 +102,22 @@ class NeutralGridStrategy:
                 ))
         else:
             # 2. Check for level crossings to "replenish" the grid
-            for level in state.levels:
-                if not level.filled:
-                    if (level.side == 'buy' and current_price <= level.price) or \
-                       (level.side == 'sell' and current_price >= level.price):
-                        level.filled = True
-                        logger.info(f"[Grid] {symbol} Level {level.price} ({level.side}) FILLED. Replenishing...")
-                        
-                        opposite_side = 'sell' if level.side == 'buy' else 'buy'
-                        signals.append(Signal(
-                            symbol=symbol,
-                            action=SignalAction.GRID_PLACE,
-                            side=Side.SHORT if opposite_side == 'sell' else Side.LONG,
-                            price=level.price,
-                            amount=level.amount,
-                            strategy="GridReplenish"
-                        ))
+            if state and state.levels:
+                for level in state.levels:
+                    if not level.filled:
+                        if (level.side == 'buy' and current_price <= level.price) or \
+                           (level.side == 'sell' and current_price >= level.price):
+                            level.filled = True
+                            logger.info(f"[Grid] {symbol} Level {level.price} ({level.side}) FILLED. Replenishing...")
+                            
+                            opposite_side = 'sell' if level.side == 'buy' else 'buy'
+                            signals.append(Signal(
+                                symbol=symbol,
+                                action=SignalAction.GRID_PLACE,
+                                side=Side.SHORT if opposite_side == 'sell' else Side.LONG,
+                                price=level.price,
+                                amount=level.amount,
+                                strategy="GridReplenish"
+                            ))
 
         return signals

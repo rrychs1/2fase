@@ -18,10 +18,9 @@ from execution.execution_engine import ExecutionEngine
 from execution.paper_manager import PaperManager
 from common.types import Side, SignalAction
 from logging_monitoring.logger import setup_logger
+from logging_monitoring.telegram_bot import TelegramBot
 
 logger = setup_logger()
-
-from execution.paper_manager import PaperManager
 
 class BotRunner:
     def __init__(self):
@@ -38,10 +37,24 @@ class BotRunner:
         self.risk_manager = RiskManager(self.config)
         self.execution = ExecutionEngine(self.exchange, self.config)
         self.paper_manager = PaperManager()
+        self.telegram = TelegramBot()
+        self.last_grid_update = {}
+        self.iteration_count = 0
+        self.trades_today = 0
+        self.last_summary_time = 0
+        # Dashboard state tracking
+        self.current_regimes = {}
+        self.current_prices = {}
+        self.current_positions = {}
         self.update_status("Initialized")
 
     async def run(self):
         logger.info("Starting Async Bot Runner (Paper & Analytics Mode)...")
+        
+        bot_username = await self.telegram.verify_bot()
+        startup_msg = f"🤖 **Bot Iniciado** (@{bot_username})\nModo: " + ("Testnet" if self.config.USE_TESTNET else "LIVE")
+        await self.telegram.send_message(startup_msg)
+        
         await self.exchange.init()
         
         if not self.config.ANALYSIS_ONLY:
@@ -54,19 +67,25 @@ class BotRunner:
                 try:
                     await self.iterate()
                 except Exception as e:
-                    logger.error(f"Error in iteration: {e}", exc_info=True)
+                    error_msg = f"Error in iteration: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    await self.telegram.send_error_alert(error_msg)
                 
                 elapsed = time.time() - start_iter
                 sleep_time = max(1, self.config.POLLING_INTERVAL - elapsed)
                 await asyncio.sleep(sleep_time)
         finally:
+            await self.telegram.send_message("🛑 **Bot Detenido**")
             await self.exchange.close()
 
     async def iterate(self):
-        logger.info("--- Starting Iteration ---")
+        self.iteration_count += 1
+        logger.info(f"--- Starting Iteration #{self.iteration_count} ---")
         self.update_status("Running")
         
         current_prices = {}
+        self.current_regimes = {}
+        self.current_positions = {}
         # 0. Fetch latest prices for all symbols first to accurately estimate equity/risk
         for symbol in self.config.SYMBOLS:
             df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID)
@@ -83,9 +102,15 @@ class BotRunner:
                 equity = float(balance.get('total', {}).get('USDT', 0.0))
                 unrealized_pnl = await self.execution.get_account_pnl()
             
+            # Send periodic status update (e.g., every hour or on significant PnL change)
+            # For simplicity, we can just log it here, implementing frequency control later if needed.
+            
             # 2. Global Risk Check (Kill Switch)
             if self.risk_manager.check_daily_drawdown(unrealized_pnl, equity):
-                logger.critical("KILL SWITCH: Closing all positions!")
+                msg = "KILL SWITCH: Closing all positions!"
+                logger.critical(msg)
+                await self.telegram.send_error_alert(msg)
+                
                 if self.config.ANALYSIS_ONLY:
                     self.paper_manager.state["positions"] = {}
                     self.paper_manager.state["pending_orders"] = []
@@ -115,12 +140,17 @@ class BotRunner:
             vp = compute_volume_profile(df_4h)
             
             regime = self.regime_detector.detect_regime(df_4h)
+            self.current_regimes[symbol] = regime
 
             # 4. Strategy Analysis
             if self.config.ANALYSIS_ONLY:
                 position = self.paper_manager.state["positions"].get(symbol, {})
             else:
                 position = await self.execution.get_position(symbol)
+
+            # Track position for dashboard
+            if position:
+                self.current_positions[symbol] = position
 
             # Concise Symbol Summary
             pos_info = "None"
@@ -138,6 +168,25 @@ class BotRunner:
             }
             signals = await self.router.route_signals(symbol, regime, market_state)
             
+            # Notify for Grid Initialization (Batched)
+            grid_init_signals = [s for s in signals if s.strategy == "GridInitial"]
+            if grid_init_signals:
+                now = time.time()
+                last_time = self.last_grid_update.get(symbol, 0)
+                if now - last_time > 300: # 5 minute cooldown
+                    # Format levels for display
+                    levels_msg = "\n".join([
+                        f"• {s.side.name} @ {s.price:.2f} ({s.amount:.3f})" 
+                        for s in sorted(grid_init_signals, key=lambda x: x.price)
+                    ])
+                    
+                    await self.telegram.send_message(
+                        f"♻️ **Grid Iniciado** para {symbol}\n"
+                        f"**Hora:** {datetime.now().strftime('%H:%M:%S')}\n"
+                        f"**Niveles ({len(grid_init_signals)}):**\n{levels_msg}"
+                    )
+                    self.last_grid_update[symbol] = now
+
             # 5. Execution Logic
             for signal in signals:
                 if not signal.price: continue
@@ -150,6 +199,7 @@ class BotRunner:
                 
                 if self.config.ANALYSIS_ONLY:
                     self.paper_manager.execute_signal(signal)
+                    # Notify on Paper Trade? Maybe optionally.
                 else:
                     # LIVE EXECUTION
                     if signal.action == SignalAction.GRID_PLACE:
@@ -159,6 +209,16 @@ class BotRunner:
                         )
                         if yield_order:
                             logger.info(f"[LIVE] Grid Limit Order: {signal.side} @ {signal.price}")
+                            
+                            # Notify ONLY for Grid Replenishments (implies a fill occurred)
+                            if signal.strategy == "GridReplenish":
+                                filled_side = "BUY" if signal.side == Side.SHORT else "SELL"
+                                await self.telegram.send_trade_alert(
+                                    symbol, filled_side, signal.price, signal.amount, "Grid Fill & Replenish"
+                                )
+                                self.trades_today += 1
+                            elif signal.strategy == "GridInitial":
+                                logger.info(f"Grid Initialized for {symbol} (No Alert)")
 
                     elif signal.action in [SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT]:
                         # 1. Market Entry
@@ -167,6 +227,10 @@ class BotRunner:
                         )
                         if order:
                             logger.info(f"[LIVE] Market Entry Executed: {order.get('id')}")
+                            await self.telegram.send_trade_alert(
+                                symbol, signal.side.value, signal.price, signal.amount, f"Market Entry ({signal.strategy})"
+                            )
+                            self.trades_today += 1
                             
                             # 2. Place SL (Stop Market)
                             if signal.stop_loss:
@@ -193,6 +257,9 @@ class BotRunner:
                             params={'reduceOnly': True}
                         )
                         logger.info(f"[LIVE] Position Closed: {symbol}")
+                        await self.telegram.send_trade_alert(
+                            symbol, "CLOSE", price, signal.amount, f"Exit ({signal.strategy})"
+                        )
             
             # Paper Trading Logging
             self._append_paper_record(
@@ -203,6 +270,23 @@ class BotRunner:
                 virtual_equity=self.paper_manager.get_equity(current_prices)
             )
 
+        # Periodic Summary (every 6 hours)
+        now = time.time()
+        if now - self.last_summary_time > 21600:  # 6 hours = 21600s
+            uptime = str(datetime.now() - self.start_time).split('.')[0]
+            await self.telegram.send_message(
+                f"📊 **Resumen Periódico**\n"
+                f"⏱ Uptime: {uptime}\n"
+                f"💰 Equity: {equity:.2f} USDT\n"
+                f"📈 PnL: {unrealized_pnl:+.2f} USDT\n"
+                f"🔄 Iteraciones: {self.iteration_count}\n"
+                f"📋 Trades hoy: {self.trades_today}"
+            )
+            self.last_summary_time = now
+
+        # Write unified dashboard state
+        self._write_dashboard_state(equity, unrealized_pnl, current_prices)
+
     def update_status(self, status):
         uptime = str(datetime.now() - self.start_time).split(".")[0]
         status_data = {
@@ -211,6 +295,39 @@ class BotRunner:
             "last_loop": datetime.now().isoformat()
         }
         with open("status.json", "w") as f: json.dump(status_data, f, indent=4)
+
+    def _write_dashboard_state(self, equity, unrealized_pnl, current_prices):
+        """Write unified state for the dashboard — works in both paper and live modes."""
+        try:
+            if self.config.ANALYSIS_ONLY:
+                balance = self.paper_manager.state.get("balance", 0)
+                positions = self.paper_manager.state.get("positions", {})
+                pending = self.paper_manager.state.get("pending_orders", [])
+                history = self.paper_manager.state.get("history", [])
+            else:
+                balance = equity - unrealized_pnl
+                positions = self.current_positions
+                pending = []  # Live orders are on exchange, not local
+                history = []
+
+            state = {
+                "balance": round(balance, 2),
+                "equity": round(equity, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "mode": "Paper" if self.config.ANALYSIS_ONLY else ("Testnet" if self.config.USE_TESTNET else "Live"),
+                "positions": positions,
+                "pending_orders": pending,
+                "history": history[-50:],  # last 50 trades
+                "regimes": self.current_regimes,
+                "prices": {s: round(p, 2) for s, p in current_prices.items()},
+                "iteration": self.iteration_count,
+                "timestamp": datetime.now().isoformat(),
+                "uptime": str(datetime.now() - self.start_time).split(".")[0],
+            }
+            with open("dashboard_state.json", "w") as f:
+                json.dump(state, f, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"Failed to write dashboard state: {e}")
 
     def _append_paper_record(self, **kwargs):
         record = {'ts': datetime.utcnow().isoformat(), **kwargs}
