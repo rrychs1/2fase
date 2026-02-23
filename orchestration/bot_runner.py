@@ -51,7 +51,8 @@ class BotRunner:
         self.update_status("Initialized")
 
     async def run(self):
-        logger.info("Starting Async Bot Runner (Paper & Analytics Mode)...")
+        mode_str = "SIM" if self.config.TRADING_ENV == 'SIM' else ("Analysis Only (Paper)" if self.config.ANALYSIS_ONLY else ("Testnet" if self.config.USE_TESTNET else "LIVE"))
+        logger.info(f"Starting Async Bot Runner [Mode: {mode_str}]...")
         
         bot_username = await self.telegram.verify_bot()
         startup_msg = f"🤖 **Bot Iniciado** (@{bot_username})\nModo: " + ("Testnet" if self.config.USE_TESTNET else "LIVE")
@@ -74,6 +75,8 @@ class BotRunner:
                     await self.telegram.send_error_alert(error_msg)
                 
                 elapsed = time.time() - start_iter
+                logger.info(f"Cycle processed | symbols={len(self.config.SYMBOLS)} duration={elapsed*1000:.0f}ms")
+                
                 sleep_time = max(1, self.config.POLLING_INTERVAL - elapsed)
                 await asyncio.sleep(sleep_time)
         finally:
@@ -82,7 +85,7 @@ class BotRunner:
 
     async def iterate(self):
         self.iteration_count += 1
-        logger.info(f"--- Starting Iteration #{self.iteration_count} ---")
+        # Silent start, only log summary at the end
         self.update_status("Running")
         
         current_prices = {}
@@ -159,9 +162,9 @@ class BotRunner:
             # Concise Symbol Summary
             pos_info = "None"
             if position:
-                pos_info = f"{position['side']} {position['amount']:.4f}"
+                pos_info = f"{position.get('side', '')} {float(position.get('amount', 0)):.4f}"
             
-            logger.info(f"[{symbol}] Price: {price:.2f} | Regime: {regime.upper()} | Pos: {pos_info}")
+            logger.debug(f"[{symbol}] Price: {price:.2f} | Regime: {regime.upper()} | Pos: {pos_info}")
 
             market_state = {
                 'price': price,

@@ -15,6 +15,7 @@ class ExchangeClient:
     def __init__(self):
         self.exchange = None
         self.public_exchange = None
+        self.sim_mode = Config.TRADING_ENV == 'SIM'
         self._initialize_clients()
 
     async def fetch_ohlcv(self, symbol, timeframe, limit=500):
@@ -104,6 +105,10 @@ class ExchangeClient:
             'enableRateLimit': True,
         }
         
+        if self.sim_mode:
+            logger.info("SIM Mode active: Bypassing exchange client initialization.")
+            return
+
         self.exchange = ccxt.binanceusdm(config)
         
         # Public Client config
@@ -130,6 +135,10 @@ class ExchangeClient:
 
     async def init(self):
         """Initialize and load markets asynchronously with manual fallback."""
+        if self.sim_mode:
+            logger.info("SIM Mode: Skipping market loading.")
+            return
+
         try:
             # Try to load markets for both
             if self.public_exchange:
@@ -351,6 +360,9 @@ class ExchangeClient:
 
     async def fetch_balance(self):
         """Fetch balance with multiple fallbacks, including a direct API request."""
+        if self.sim_mode:
+            return {'total': {'USDT': 10000.0}, 'free': {'USDT': 10000.0}, 'info': {}}
+
         if Config.USE_TESTNET:
             # Skip CCXT on Demo Trading — go straight to manual for reliability
             return await self._manual_fetch_balance()
@@ -385,6 +397,10 @@ class ExchangeClient:
             amount_prec = self.amount_to_precision(symbol, amount)
             price_prec = self.price_to_precision(symbol, price) if price else None
             
+            if self.sim_mode:
+                logger.info(f"[SIM] Created {side} order for {symbol} @ {price or 'MARKET'}")
+                return {"id": f"sim-{int(time.time())}", "status": "closed", "symbol": symbol, "side": side, "amount": amount_prec, "price": price_prec}
+
             if Config.USE_TESTNET:
                 # Direct API Call for maximum reliability on Testnet
                 return await self._manual_create_order(clean_symbol, type, side, amount_prec, price_prec, params)

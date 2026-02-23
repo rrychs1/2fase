@@ -13,8 +13,9 @@ def verify_keys():
     print("--- Verificador de Claves Binance (Mejorado) ---")
     
     api_key = os.getenv('BINANCE_API_KEY')
-    secret_key = os.getenv('BINANCE_SECRET_KEY')
-    use_testnet = os.getenv('USE_TESTNET', 'True').lower() == 'true'
+    secret_key = os.getenv('BINANCE_API_SECRET') or os.getenv('BINANCE_SECRET_KEY')
+    trading_env = os.getenv('TRADING_ENV', 'TESTNET').upper()
+    use_testnet = trading_env in ['TESTNET', 'DEMO'] or os.getenv('USE_TESTNET', 'True').lower() == 'true'
     
     if not api_key or not secret_key:
         print("❌ ERROR: No se encontraron claves API en .env")
