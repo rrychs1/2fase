@@ -56,6 +56,7 @@ class BotRunner:
         
         bot_username = await self.telegram.verify_bot()
         startup_msg = f"🤖 **Bot Iniciado** (@{bot_username})\nModo: " + ("Testnet" if self.config.USE_TESTNET else "LIVE")
+        logger.info(f"Risk Hierarchy: Kill Switch -> Safe Mode -> Daily Loss -> Cooldown")
         await self.telegram.send_message(startup_msg)
         
         await self.exchange.init()

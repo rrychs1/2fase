@@ -1,5 +1,7 @@
 import logging
-from datetime import date
+import json
+import os
+from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -8,18 +10,55 @@ class RiskManager:
         self.config = config
         self.daily_pnl = 0.0
         self.last_reset_date = date.today()
+        self.day_start_equity = 0.0
         self.reference_equity = 0.0
         self.last_cycle_equity = 0.0
         self.is_safe_mode = False
         self.drift_threshold = getattr(config, 'EQUITY_DRIFT_THRESHOLD', 0.05) # 5% default
+        self.is_kill_switch_active = False
+        self.last_kill_switch_alert = 0
+        self.alert_throttle_seconds = 3600 # 1 hour default
+        self.state_file = "risk_state.json"
+        self.load_state()
 
-    def _check_daily_reset(self):
-        """Reset PnL tracking at midnight."""
+    def _check_daily_reset(self, current_equity=0.0):
+        """Reset PnL and day_start_equity tracking at midnight."""
         today = date.today()
         if today != self.last_reset_date:
             logger.info(f"[Risk] Daily reset: PnL {self.daily_pnl:.2f} -> 0.00 (new day: {today})")
             self.daily_pnl = 0.0
+            self.day_start_equity = current_equity
             self.last_reset_date = today
+            self.is_kill_switch_active = False # Reset kill switch on new day
+            self.save_state()
+
+    def load_state(self):
+        """Load persistent risk state from JSON."""
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+                self.day_start_equity = float(state.get('day_start_equity', 0.0))
+                self.last_reset_date = date.fromisoformat(state.get('last_reset_date', str(date.today())))
+                self.is_kill_switch_active = bool(state.get('is_kill_switch_active', False))
+                logger.info(f"[Risk] State loaded: day_start={self.day_start_equity}, kill_switch={self.is_kill_switch_active}")
+        except Exception as e:
+            logger.warning(f"[Risk] Failed to load state: {e}")
+
+    def save_state(self):
+        """Save persistent risk state to JSON."""
+        try:
+            state = {
+                'day_start_equity': self.day_start_equity,
+                'last_reset_date': self.last_reset_date.isoformat(),
+                'is_kill_switch_active': self.is_kill_switch_active,
+                'updated_at': datetime.now().isoformat()
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[Risk] Failed to save state: {e}")
 
     def sync_reference_equity(self, equity: float, unrealized_pnl: float):
         """
@@ -40,6 +79,11 @@ class RiskManager:
 
         self.reference_equity = equity
         
+        # Initialize day_start_equity if 0
+        if self.day_start_equity <= 0:
+            self.day_start_equity = equity
+            self.save_state()
+
         # Monitor Drift
         if self.last_cycle_equity > 0:
             drift = abs(equity - self.last_cycle_equity) / self.last_cycle_equity
@@ -90,17 +134,40 @@ class RiskManager:
         if not getattr(self.config, 'KILL_SWITCH_ENABLED', True):
             return False
 
-        self._check_daily_reset()
+        self._check_daily_reset(equity)
+        
+        # Priority 1: If Kill Switch is already active, stay active
+        if self.is_kill_switch_active:
+            self._throttle_alert("KILL SWITCH STILL ACTIVE: Blocking all new entries.")
+            return True
+
+        # Use day_start_equity as reference if available, otherwise current equity
+        ref_equity = self.day_start_equity if self.day_start_equity > 0 else equity
+        if ref_equity <= 0: return False
+
         self.daily_pnl = current_pnl
-        limit = -equity * self.config.DAILY_LOSS_LIMIT
+        limit = -ref_equity * self.config.DAILY_LOSS_LIMIT
         
         # Early warning at 50% of limit
         warning_threshold = limit * 0.5
         if self.daily_pnl <= warning_threshold and self.daily_pnl > limit:
-            logger.warning(f"[Risk] ⚠️ Drawdown at 50% of limit: PnL={current_pnl:.2f}, Limit={limit:.2f}")
+            logger.warning(f"[Risk] ⚠️ Drawdown at 50% of limit: PnL={current_pnl:.2f}, Limit={limit:.2f} (Ref={ref_equity:.2f})")
         
         if self.daily_pnl <= limit:
-            logger.critical(f"Daily Kill Switch Triggered! PnL={current_pnl:.2f} <= Limit={limit:.2f}")
+            if not self.is_kill_switch_active:
+                logger.critical(f"Daily Kill Switch Triggered! PnL={current_pnl:.2f} <= Limit={limit:.2f}")
+                self.is_kill_switch_active = True
+                self.save_state()
+            return True
+        return False
+
+    def _throttle_alert(self, message):
+        """Logs message only once every alert_throttle_seconds."""
+        import time
+        now = time.time()
+        if now - self.last_kill_switch_alert > self.alert_throttle_seconds:
+            logger.warning(f"[Risk] {message}")
+            self.last_kill_switch_alert = now
             return True
         return False
 
