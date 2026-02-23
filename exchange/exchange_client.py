@@ -57,9 +57,28 @@ class ExchangeClient:
         return []
 
 
+    async def _apply_backoff(self):
+        """Apply centralized delay if backoff is active."""
+        if self.backoff_multiplier > 1.0:
+            delay = min(30, (self.backoff_multiplier - 1) * 2) # Caps at 30s
+            if delay > 0.5:
+                logger.warning(f"[Exchange] Rate-limit backoff: Sleeping {delay:.2f}s")
+                await asyncio.sleep(delay)
+            
+            # Decay backoff over time
+            now = time.time()
+            if now - self.last_rate_limit_hit > 60:
+                self.backoff_multiplier *= self.backoff_decay
+                if self.backoff_multiplier < 1.1: self.backoff_multiplier = 1.0
+
     def _manual_request(self, method, endpoint, params=None):
         """Unified signed request helper for Testnet/Live manual fallbacks."""
+        # Note: In manual requests, we use synchronous requests, so we handle backoff simply
+        if self.backoff_multiplier > 1.2:
+            time.sleep(min(5, self.backoff_multiplier))
+
         base_url = "https://demo-fapi.binance.com" if Config.USE_TESTNET else "https://fapi.binance.com"
+        # ... rest of the method logic unchanged in its core ...
         timestamp = int(time.time() * 1000)
         
         payload = {'timestamp': timestamp, 'recvWindow': 10000}
@@ -90,6 +109,11 @@ class ExchangeClient:
                 
             if r.status_code == 200:
                 return r.json()
+            elif r.status_code in [429, 418]:
+                logger.error(f"RATE LIMIT HIT (Manual): {r.status_code}")
+                self.backoff_multiplier += 1.0
+                self.last_rate_limit_hit = time.time()
+                return None
             else:
                 logger.error(f"Manual {method} {endpoint} failed: {r.status_code} {r.text}")
                 return None
@@ -104,6 +128,11 @@ class ExchangeClient:
             'secret': Config.BINANCE_SECRET_KEY,
             'enableRateLimit': True,
         }
+        
+        # Adaptive Backoff State
+        self.backoff_multiplier = 1.0
+        self.last_rate_limit_hit = 0
+        self.backoff_decay = 0.95 # Decay backoff by 5% each minute (approx)
         
         if self.sim_mode:
             logger.info("SIM Mode active: Bypassing exchange client initialization.")

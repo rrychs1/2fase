@@ -14,6 +14,7 @@ class RiskManager:
         self.reference_equity = 0.0
         self.last_cycle_equity = 0.0
         self.is_safe_mode = False
+        self.is_high_caution = False # Phase 5: halted opening due to CB or Alerts
         self.drift_threshold = getattr(config, 'EQUITY_DRIFT_THRESHOLD', 0.05) # 5% default
         self.is_kill_switch_active = False
         self.last_kill_switch_alert = 0
@@ -111,11 +112,12 @@ class RiskManager:
     def calculate_position_size(self, symbol: str, entry_price: float, stop_loss: float, exchange_client=None) -> float:
         """
         Calculates position size using the consistent reference equity.
-        Validates against exchange filters if client is provided.
+        Validates against exchange filters and caution modes.
         """
         equity = self.reference_equity
-        if equity <= 0 or self.is_safe_mode:
-            logger.warning(f"[Risk] {symbol} Skipping size calc (Equity={equity}, SafeMode={self.is_safe_mode})")
+        if equity <= 0 or self.is_safe_mode or self.is_high_caution:
+            reason = "Equity <= 0" if equity <= 0 else ("Safe Mode" if self.is_safe_mode else "High Caution")
+            logger.warning(f"[Risk] {symbol} Skipping size calc: {reason}")
             return 0.0
 
         risk_amount = equity * self.config.MAX_RISK_PER_TRADE

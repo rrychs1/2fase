@@ -25,6 +25,7 @@ logger = setup_logger()
 class BotRunner:
     def __init__(self, config=None, exchange=None, risk_manager=None, data_engine=None):
         from data.db_manager import DbManager
+        from risk.circuit_breaker import CircuitBreaker
         
         self.start_time = datetime.now()
         self.config = config or Config()
@@ -32,6 +33,7 @@ class BotRunner:
         self.data_engine = data_engine or DataEngine(self.exchange)
         self.regime_detector = RegimeDetector()
         self.db = DbManager() # Senior Audit Phase 4
+        self.circuit_breaker = CircuitBreaker() # Senior Audit Phase 5
         
         self.neutral_grid = NeutralGridStrategy(self.config)
         self.trend_dca = TrendDcaStrategy(self.config)
@@ -72,10 +74,12 @@ class BotRunner:
             while True:
                 start_iter = time.time()
                 try:
+                    await self.exchange._apply_backoff() # Phase 5
                     await self.iterate()
                 except Exception as e:
                     error_msg = f"Error in iteration: {e}"
                     logger.error(error_msg, exc_info=True)
+                    self.circuit_breaker.report_error() # Phase 5
                     await self.telegram.send_error_alert(error_msg)
                 
                 elapsed = time.time() - start_iter
@@ -89,8 +93,22 @@ class BotRunner:
 
     async def iterate(self):
         self.iteration_count += 1
-        # Silent start, only log summary at the end
-        self.update_status("Running")
+        
+        # Phase 5: Check Circuit Breaker & Alerts Health
+        cb_tripped = self.circuit_breaker.is_tripped()
+        alert_healthy = self.telegram.is_healthy()
+        
+        if cb_tripped or not alert_healthy:
+            if not self.risk_manager.is_high_caution:
+                reason = "Circuit Breaker Tripped" if cb_tripped else "Alerts Channel Unhealthy"
+                logger.critical(f"ACTIVATING HIGH CAUTION MODE: {reason}")
+                self.risk_manager.is_high_caution = True
+        else:
+            if self.risk_manager.is_high_caution:
+                logger.info("Deactivating High Caution Mode. Systems normalized.")
+                self.risk_manager.is_high_caution = False
+
+        self.update_status("Running" if not self.risk_manager.is_high_caution else "HIGH CAUTION")
         
         current_prices = {}
         self.current_regimes = {}

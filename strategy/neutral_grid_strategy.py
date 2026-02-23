@@ -113,11 +113,13 @@ class NeutralGridStrategy:
                             signals.append(Signal(
                                 symbol=symbol,
                                 action=SignalAction.GRID_PLACE,
-                                side=Side.SHORT if opposite_side == 'sell' else Side.LONG,
+                                side=Side.SHORT if level.side == 'sell' else Side.LONG, # Fixed side logic too
                                 price=level.price,
                                 amount=level.amount,
                                 strategy="GridReplenish"
                             ))
+                return signals
+            return []
 
     def reconcile_with_exchange(self, symbol: str, open_orders: List[dict]):
         """
@@ -158,5 +160,3 @@ class NeutralGridStrategy:
                 if abs(level.price - price) / price < 0.0001: # Match by price proximity
                     level.order_id = str(order_id)
                     return
-
-        return signals

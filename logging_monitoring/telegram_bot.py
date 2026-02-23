@@ -15,6 +15,9 @@ class TelegramBot:
         self.enabled = bool(self.token and self.chat_id)
         self.bot = Bot(token=self.token) if self.enabled else None
         
+        self.consecutive_failures = 0
+        self.max_failures = 3
+        
         if not self.enabled:
             logger.warning("Telegram configuration missing. Notifications disabled.")
         else:
@@ -36,8 +39,15 @@ class TelegramBot:
         
         try:
             await self.bot.send_message(chat_id=self.chat_id, text=message)
+            self.consecutive_failures = 0 # Reset on success
         except TelegramError as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            self.consecutive_failures += 1
+            logger.error(f"Failed to send Telegram message: {e} (failures: {self.consecutive_failures})")
+
+    def is_healthy(self) -> bool:
+        """Check if the alert channel is functioning."""
+        if not self.enabled: return False
+        return self.consecutive_failures < self.max_failures
 
     async def send_trade_alert(self, symbol: str, side: str, price: float, amount: float, strategy: str):
         """Send a formatted trade alert."""
