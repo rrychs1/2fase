@@ -110,7 +110,6 @@ class NeutralGridStrategy:
                             level.filled = True
                             logger.info(f"[Grid] {symbol} Level {level.price} ({level.side}) FILLED. Replenishing...")
                             
-                            opposite_side = 'sell' if level.side == 'buy' else 'buy'
                             signals.append(Signal(
                                 symbol=symbol,
                                 action=SignalAction.GRID_PLACE,
@@ -119,5 +118,45 @@ class NeutralGridStrategy:
                                 amount=level.amount,
                                 strategy="GridReplenish"
                             ))
+
+    def reconcile_with_exchange(self, symbol: str, open_orders: List[dict]):
+        """
+        Synchronizes internal grid state with active exchange orders.
+        Detects orphaned orders and missing levels.
+        """
+        state = self.grid_states.get(symbol)
+        if not state or not state.is_active:
+            return
+
+        order_ids_on_exchange = {str(o['id']) for o in open_orders}
+        
+        for level in state.levels:
+            if level.order_id:
+                if level.order_id not in order_ids_on_exchange:
+                    if not level.filled:
+                        logger.warning(f"[Grid] {symbol} Order {level.order_id} missing on exchange but not marked filled. Resetting.")
+                        level.order_id = None
+                else:
+                    # Order still active
+                    pass
+            elif not level.filled:
+                # Level should have an order but order_id is missing (maybe failed to place)
+                pass
+
+        # Detect Orphans: orders on exchange that we don't recognize
+        recognized_ids = {str(l.order_id) for l in state.levels if l.order_id}
+        for o in open_orders:
+            oid = str(o['id'])
+            if oid not in recognized_ids:
+                logger.warning(f"[Grid] {symbol} Orphaned order detected: {oid} {o['side']} @ {o['price']}. Recommended: Manual cancel or reconstruction.")
+
+    def update_order_id(self, symbol: str, price: float, order_id: str):
+        """Update the internal state with the real order ID from exchange."""
+        state = self.grid_states.get(symbol)
+        if state:
+            for level in state.levels:
+                if abs(level.price - price) / price < 0.0001: # Match by price proximity
+                    level.order_id = str(order_id)
+                    return
 
         return signals

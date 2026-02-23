@@ -1,4 +1,5 @@
 import logging
+import time
 from exchange.exchange_client import ExchangeClient
 from config.config_loader import Config
 
@@ -53,9 +54,10 @@ class ExecutionEngine:
         Placing orders with precision enforcement.
         Supports: 'limit', 'market', and 'stop' (via params)
         """
-        if getattr(self.config, 'ANALYSIS_ONLY', False):
-            logger.info(f"[EXEC] ANALYSIS_ONLY: Simulation of {side} {type} {symbol} {amount} @ {price}")
-            return {"id": "sim-order", "status": "open"}
+        if getattr(self.config, 'ANALYSIS_ONLY', False) or getattr(self.config, 'DRY_RUN', False):
+            mode = "ANALYSIS_ONLY" if getattr(self.config, 'ANALYSIS_ONLY', False) else "DRY_RUN"
+            logger.info(f"[EXEC] {mode}: Simulation of {side} {type} {symbol} {amount} @ {price}")
+            return {"id": f"sim-{side}-{int(time.time())}", "status": "open", "info": {"simulated": True}}
             
         try:
             # Delegate to Unified Exchange Client

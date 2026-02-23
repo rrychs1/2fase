@@ -18,8 +18,13 @@ class RiskManager:
         self.is_kill_switch_active = False
         self.last_kill_switch_alert = 0
         self.alert_throttle_seconds = 3600 # 1 hour default
+        self.reconcile_interval = 20 # Every 20 iterations
         self.state_file = "risk_state.json"
         self.load_state()
+
+    def needs_reconciliation(self, iteration_count: int) -> bool:
+        """Check if it's time to reconcile internal state with exchange."""
+        return iteration_count > 0 and (iteration_count % self.reconcile_interval == 0)
 
     def _check_daily_reset(self, current_equity=0.0):
         """Reset PnL and day_start_equity tracking at midnight."""
@@ -63,17 +68,22 @@ class RiskManager:
     def sync_reference_equity(self, equity: float, unrealized_pnl: float):
         """
         Maintains a consistent equity reference for the entire cycle.
-        Activates safe mode if equity is invalid.
+        Activates safe mode if equity is invalid or drift is too high.
+        Returns (drift_alert_needed, drift_value)
         """
+        drift_alert = False
+        drift_val = 0.0
+
         if equity is None or equity <= 0:
             if not self.is_safe_mode:
                 logger.critical(f"[Risk] INVALID EQUITY DETECTED: {equity}. ACTIVATING SAFE MODE.")
                 self.is_safe_mode = True
             self.reference_equity = 0.0
-            return
+            return drift_alert, 0.0
 
-        # Recovery from safe mode if equity becomes positive again
-        if self.is_safe_mode and equity > 0:
+        # Recovery from safe mode if equity becomes positive again (ONLY if it was due to invalid equity, not drift)
+        # For simplicity, we allow manual reset of is_safe_mode or recovery if equity > 0
+        if self.is_safe_mode and equity > 0 and self.reference_equity == 0:
             logger.info(f"[Risk] Equity recovered to {equity}. Deactivating safe mode.")
             self.is_safe_mode = False
 
@@ -86,13 +96,17 @@ class RiskManager:
 
         # Monitor Drift
         if self.last_cycle_equity > 0:
-            drift = abs(equity - self.last_cycle_equity) / self.last_cycle_equity
-            if drift > self.drift_threshold:
-                logger.warning(f"[Risk] SIGNIFICANT EQUITY DRIFT DETECTED: {drift*100:.2f}% "
-                               f"({self.last_cycle_equity:.2f} -> {equity:.2f}) without recorded trades.")
-                # We don't activate safe mode automatically for drift, but we log strongly.
+            drift_val = abs(equity - self.last_cycle_equity) / self.last_cycle_equity
+            if drift_val > self.drift_threshold:
+                logger.warning(f"[Risk] SIGNIFICANT EQUITY DRIFT: {drift_val*100:.2f}% "
+                               f"({self.last_cycle_equity:.2f} -> {equity:.2f})")
+                
+                if not self.is_safe_mode:
+                    self.is_safe_mode = True
+                    drift_alert = True
         
         self.last_cycle_equity = equity
+        return drift_alert, drift_val
 
     def calculate_position_size(self, symbol: str, entry_price: float, stop_loss: float, exchange_client=None) -> float:
         """

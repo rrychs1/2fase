@@ -111,9 +111,23 @@ class BotRunner:
                 unrealized_pnl = await self.execution.get_account_pnl()
             
             # Sync reference equity for the entire cycle
-            self.risk_manager.sync_reference_equity(equity, unrealized_pnl)
+            drift_alert, drift_val = self.risk_manager.sync_reference_equity(equity, unrealized_pnl)
+            if drift_alert:
+                alert_msg = (f"⚠️ **ALERTA DE SEGURIDAD: Deriva de Equity**\n"
+                             f"Se ha detectado un cambio inexplicable de {drift_val*100:.2f}%\n"
+                             f"**Modo Seguro ACTIVADO**. Se bloquean nuevas entradas.")
+                await self.telegram.send_error_alert(alert_msg)
             
-            # 2. Global Risk Check (Kill Switch)
+            # 2. Periodic Reconciliation (Senior Audit Phase 3)
+            # Revalidar estado real vs memoria cada N iteraciones
+            if self.risk_manager.needs_reconciliation(self.iteration_count):
+                logger.info(f"[Bot] Starting Periodic Reconciliation (Iteration {self.iteration_count})")
+                for s_symbol in self.config.SYMBOLS:
+                    open_orders = await self.exchange.fetch_open_orders(s_symbol)
+                    self.neutral_grid.reconcile_with_exchange(s_symbol, open_orders)
+                    self.trend_dca.reconcile_with_exchange(s_symbol, open_orders)
+
+            # 3. Global Risk Check (Kill Switch)
             if self.risk_manager.check_daily_drawdown(unrealized_pnl, equity):
                 msg = "KILL SWITCH: Closing all positions!"
                 logger.critical(msg)
@@ -147,7 +161,18 @@ class BotRunner:
             df_trend = add_standard_indicators(df_trend)
             vp = compute_volume_profile(df_4h)
             
+            # 3. Transition Tolerance (Phase 3)
+            # If regime changed, reconcile immediately to avoid orphan orders
+            old_regime = self.current_regimes.get(symbol)
             regime = self.regime_detector.detect_regime(df_4h)
+            
+            if old_regime and old_regime != regime:
+                logger.warning(f"[{symbol}] REGIME CHANGE DETECTED: {old_regime} -> {regime}. Immediate reconciliation starting...")
+                trans_orders = await self.exchange.fetch_open_orders(symbol)
+                # Ensure strategies see the current orders before routing signals
+                self.neutral_grid.reconcile_with_exchange(symbol, trans_orders)
+                self.trend_dca.reconcile_with_exchange(symbol, trans_orders)
+            
             self.current_regimes[symbol] = regime
 
             # 4. Strategy Analysis
@@ -228,8 +253,10 @@ class BotRunner:
                         yield_order = await self.execution.place_order(
                             symbol, signal.side.value.lower(), 'limit', signal.amount, signal.price
                         )
-                        if yield_order:
-                            logger.info(f"[LIVE] Grid Limit Order: {signal.side} @ {signal.price}")
+                        if yield_order and yield_order.get('id'):
+                            # Feedback ID to strategy for reconciliation tracking
+                            self.neutral_grid.update_order_id(symbol, signal.price, yield_order['id'])
+                            logger.info(f"[LIVE] Grid Limit Order: {signal.side} @ {signal.price} ID: {yield_order['id']}")
                             
                             # Notify ONLY for Grid Replenishments (implies a fill occurred)
                             if signal.strategy == "GridReplenish":
@@ -256,7 +283,7 @@ class BotRunner:
                             # 2. Place SL (Stop Market)
                             if signal.stop_loss:
                                 sl_side = 'sell' if signal.side == Side.LONG else 'buy'
-                                await self.execution.place_order(
+                                sl_order = await self.execution.place_order(
                                     symbol, sl_side, 'stop', signal.amount, signal.stop_loss,
                                     params={'stopPrice': signal.stop_loss, 'reduceOnly': True}
                                 )
@@ -265,11 +292,21 @@ class BotRunner:
                             # 3. Place TP (Limit)
                             if signal.take_profit:
                                 tp_side = 'sell' if signal.side == Side.LONG else 'buy'
-                                await self.execution.place_order(
+                                tp_order = await self.execution.place_order(
                                     symbol, tp_side, 'limit', signal.amount, signal.take_profit,
                                     params={'reduceOnly': True}
                                 )
                                 logger.info(f"[LIVE] Take Profit Placed @ {signal.take_profit}")
+
+                            # 4. Place DCA Orders (if any) and track them
+                            dca_levels_meta = signal.meta.get('dca_levels', [])
+                            for dca_m in dca_levels_meta:
+                                dca_order = await self.execution.place_order(
+                                    symbol, signal.side.value.lower(), 'limit', dca_m['amount'], dca_m['price']
+                                )
+                                if dca_order and dca_order.get('id'):
+                                    self.trend_dca.update_order_id(symbol, dca_m['price'], dca_order['id'])
+                                    logger.info(f"[LIVE] DCA Order placed @ {dca_m['price']} ID: {dca_order['id']}")
 
                     elif signal.action in [SignalAction.EXIT_LONG, SignalAction.EXIT_SHORT]:
                         # Close Position

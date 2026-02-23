@@ -17,6 +17,7 @@ class Config:
     
     # Modo solo análisis: evita órdenes/apalancamiento hasta validar credenciales
     ANALYSIS_ONLY = os.getenv('ANALYSIS_ONLY', 'False').lower() == 'true'
+    DRY_RUN = os.getenv('DRY_RUN', 'False').lower() == 'true'
     SYMBOLS = os.getenv('SYMBOLS', 'BTC/USDT,ETH/USDT').split(',')
     
     # --- Risk Parameters ---

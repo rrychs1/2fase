@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 class TrendDcaStrategy:
     def __init__(self, config):
         self.config = config
+        self.active_positions: dict[str, TrendPosition] = {} # symbol -> TrendPosition
 
     def generate_trend_signal(self, symbol: str, df: pd.DataFrame) -> Side:
         """
@@ -102,6 +103,11 @@ class TrendDcaStrategy:
                         confidence=0.8,
                         meta={'dca_levels': [{'price': d.price, 'amount': d.amount, 'filled': False} for d in dca_levels]}
                     ))
+                    # Initialize internal position tracking
+                    self.active_positions[symbol] = TrendPosition(
+                        symbol=symbol, side=Side.LONG, entry_price=current_price,
+                        dca_levels=dca_levels, stop_loss=sl, take_profit=tp, is_active=True
+                    )
                 else:
                     logger.info(f"[TrendDca] {symbol} Bullish trend. Waiting for pullback to {last_row['EMA_fast']:.2f}")
 
@@ -124,6 +130,11 @@ class TrendDcaStrategy:
                         confidence=0.8,
                         meta={'dca_levels': [{'price': d.price, 'amount': d.amount, 'filled': False} for d in dca_levels]}
                     ))
+                    # Initialize internal position tracking
+                    self.active_positions[symbol] = TrendPosition(
+                        symbol=symbol, side=Side.SHORT, entry_price=current_price,
+                        dca_levels=dca_levels, stop_loss=sl, take_profit=tp, is_active=True
+                    )
                 else:
                     logger.info(f"[TrendDca] {symbol} Bearish trend. Waiting for pullback to {last_row['EMA_fast']:.2f}")
             else:
@@ -132,43 +143,79 @@ class TrendDcaStrategy:
         # 2. Logic for EXISTING Positions (Exit & DCA)
         else:
             side = position_state.get('side')
-            # Check for Exit (Already active in previous implementation)
+            # Ensure internal state is synchronized with current real position
+            if symbol not in self.active_positions or not self.active_positions[symbol].is_active:
+                # Reconstruction of state if missing but position exists
+                self.active_positions[symbol] = TrendPosition(
+                    symbol=symbol,
+                    side=Side.LONG if side == "LONG" else Side.SHORT,
+                    entry_price=position_state.get('entry_price', 0),
+                    is_active=True
+                )
+
+            # Check for Exit
             if side == "LONG":
                 tp = position_state.get('take_profit')
                 sl = position_state.get('stop_loss')
                 if tp is not None and current_price >= tp:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_LONG, side=Side.LONG, price=current_price, strategy="TrendDCA"))
+                    self.active_positions[symbol].is_active = False 
                 elif sl is not None and current_price <= sl:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_LONG, side=Side.LONG, price=current_price, strategy="TrendDCA"))
-                    
+                    self.active_positions[symbol].is_active = False
+
                 # Check DCA levels
-                dca_levels = position_state.get('dca_levels', [])
+                dca_levels = self.active_positions[symbol].dca_levels
                 for level in dca_levels:
-                    if not level.get('filled', False) and current_price <= level['price']:
-                        logger.info(f"[TrendDca] {symbol} LONG DCA Level {level['price']} hit!")
+                    if not level.filled and current_price <= level.price:
+                        logger.info(f"[TrendDca] {symbol} LONG DCA Level {level.price} hit!")
                         signals.append(Signal(
                             symbol=symbol, action=SignalAction.DCA_ADD, side=Side.LONG, 
-                            price=level['price'], amount=level['amount'], strategy="TrendDCA"
+                            price=level.price, amount=level.amount, strategy="TrendDCA"
                         ))
-                        level['filled'] = True
+                        level.filled = True
 
             elif side == "SHORT":
                 tp = position_state.get('take_profit')
                 sl = position_state.get('stop_loss')
                 if tp is not None and current_price <= tp:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_SHORT, side=Side.SHORT, price=current_price, strategy="TrendDCA"))
+                    self.active_positions[symbol].is_active = False
                 elif sl is not None and current_price >= sl:
                     signals.append(Signal(symbol=symbol, action=SignalAction.EXIT_SHORT, side=Side.SHORT, price=current_price, strategy="TrendDCA"))
+                    self.active_positions[symbol].is_active = False
 
                 # Check DCA levels
-                dca_levels = position_state.get('dca_levels', [])
+                dca_levels = self.active_positions[symbol].dca_levels
                 for level in dca_levels:
-                    if not level.get('filled', False) and current_price >= level['price']:
-                        logger.info(f"[TrendDca] {symbol} SHORT DCA Level {level['price']} hit!")
+                    if not level.filled and current_price >= level.price:
+                        logger.info(f"[TrendDca] {symbol} SHORT DCA Level {level.price} hit!")
                         signals.append(Signal(
                             symbol=symbol, action=SignalAction.DCA_ADD, side=Side.SHORT, 
-                            price=level['price'], amount=level['amount'], strategy="TrendDCA"
+                            price=level.price, amount=level.amount, strategy="TrendDCA"
                         ))
-                        level['filled'] = True
+                        level.filled = True
 
         return signals
+
+    def reconcile_with_exchange(self, symbol: str, open_orders: list[dict]):
+        """Verify DCA orders match exchange state."""
+        pos = self.active_positions.get(symbol)
+        if not pos or not pos.is_active:
+            return
+
+        order_ids_on_exchange = {str(o['id']) for o in open_orders}
+        for level in pos.dca_levels:
+            if level.order_id and level.order_id not in order_ids_on_exchange:
+                if not level.filled:
+                    logger.warning(f"[TrendDca] {symbol} DCA Order {level.order_id} missing from exchange. Resetting.")
+                    level.order_id = None
+
+    def update_order_id(self, symbol: str, price: float, order_id: str):
+        """Update DCA level with real order ID."""
+        pos = self.active_positions.get(symbol)
+        if pos:
+            for level in pos.dca_levels:
+                if abs(level.price - price) / price < 0.0001:
+                    level.order_id = str(order_id)
+                    return
