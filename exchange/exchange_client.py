@@ -189,11 +189,16 @@ class ExchangeClient:
                         'limits': {
                             'amount': {
                                 'min': float(lot_size.get('minQty', 0)),
-                                'max': float(lot_size.get('maxQty', 1000000))
+                                'max': float(lot_size.get('maxQty', 1000000)),
+                                'step': float(lot_size.get('stepSize', 0.0001))
                             },
                             'price': {
                                 'min': float(price_filter.get('minPrice', 0)),
-                                'max': float(price_filter.get('maxPrice', 1000000))
+                                'max': float(price_filter.get('maxPrice', 1000000)),
+                                'tick': float(price_filter.get('tickSize', 0.01))
+                            },
+                            'cost': {
+                                'min': float(filters.get('MIN_NOTIONAL', {}).get('notional', 5.0))
                             }
                         },
                         'type': 'swap',
@@ -374,18 +379,48 @@ class ExchangeClient:
 
     async def _manual_fetch_balance(self):
         data = self._manual_request('GET', "/fapi/v2/balance")
-        if not data: return {'total': {'USDT': 0.0}, 'info': {}}
+        if not data: 
+            logger.warning("[Exchange] Manual fetch_balance returned no data.")
+            return {'total': {'USDT': 0.0}, 'free': {'USDT': 0.0}, 'info': {}}
         
         for asset in data:
             if asset.get('asset') == 'USDT':
                 total = float(asset.get('balance', 0))
                 free = float(asset.get('withdrawAvailable') or asset.get('availableBalance') or 0)
+                # Double check total is valid
+                if total < 0:
+                    logger.error(f"[Exchange] CRITICAL: USDT Balance is negative ({total})!")
                 return {
                     'total': {'USDT': total},
                     'free': {'USDT': free},
                     'info': asset
                 }
-        return {'total': {'USDT': 0.0}, 'info': {}}
+        return {'total': {'USDT': 0.0}, 'free': {'USDT': 0.0}, 'info': {}}
+
+    def validate_order_filters(self, symbol, amount, price=None):
+        """
+        Validates an order against symbol-specific filters (MIN_NOTIONAL, stepSize, etc).
+        Returns (is_valid, reason)
+        """
+        market = self.exchange.markets.get(symbol)
+        if not market:
+            return False, f"Market info missing for {symbol}"
+        
+        limits = market.get('limits', {})
+        
+        # 1. Min Qty
+        min_qty = limits.get('amount', {}).get('min', 0)
+        if amount < min_qty:
+            return False, f"Amount {amount} < Min Qty {min_qty}"
+        
+        # 2. Notional (Cost)
+        if price:
+            notional = amount * price
+            min_notional = limits.get('cost', {}).get('min', 5.0)
+            if notional < min_notional:
+                return False, f"Notional {notional:.2f} < Min Notional {min_notional}"
+        
+        return True, ""
 
     async def create_order(self, symbol, type, side, amount, price=None, params=None):
         """Unified order placement with manual fallback for Testnet stability."""

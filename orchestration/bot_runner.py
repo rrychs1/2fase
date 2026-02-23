@@ -95,7 +95,7 @@ class BotRunner:
         self.current_history = []
         # 0. Fetch latest prices for all symbols first to accurately estimate equity/risk
         for symbol in self.config.SYMBOLS:
-            df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID)
+            df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
             if df_4h is not None and len(df_4h) > 0:
                 current_prices[symbol] = df_4h.iloc[-1]['close']
 
@@ -109,8 +109,8 @@ class BotRunner:
                 equity = float(balance.get('total', {}).get('USDT', 0.0))
                 unrealized_pnl = await self.execution.get_account_pnl()
             
-            # Send periodic status update (e.g., every hour or on significant PnL change)
-            # For simplicity, we can just log it here, implementing frequency control later if needed.
+            # Sync reference equity for the entire cycle
+            self.risk_manager.sync_reference_equity(equity, unrealized_pnl)
             
             # 2. Global Risk Check (Kill Switch)
             if self.risk_manager.check_daily_drawdown(unrealized_pnl, equity):
@@ -131,8 +131,8 @@ class BotRunner:
 
         for symbol in self.config.SYMBOLS:
             # 3. Update Data & Indicators
-            df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID)
-            df_trend = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_TREND)
+            df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
+            df_trend = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_TREND, limit=self.config.CANDLES_ANALYSIS_LIMIT)
             
             if df_4h is None or df_trend is None or len(df_4h) < 20: continue
             
@@ -180,7 +180,7 @@ class BotRunner:
                 symbol_orders = await self.exchange.fetch_open_orders(symbol)
                 self.current_orders.extend(symbol_orders)
                 
-                symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=20)
+                symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=100)
                 self.current_history.extend(symbol_trades)
             
             # Notify for Grid Initialization (Batched)
@@ -209,9 +209,14 @@ class BotRunner:
                 # Enrich signal with amount if missing
                 if not signal.amount:
                     signal.amount = self.risk_manager.calculate_position_size(
-                        symbol, signal.price, signal.stop_loss, equity
+                        symbol, signal.price, signal.stop_loss, self.exchange
                     )
                 
+                # Safe Mode Check: Skip new entries if active
+                if self.risk_manager.is_safe_mode and signal.action in [SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT, SignalAction.GRID_PLACE]:
+                    logger.warning(f"[Bot] SAFE MODE ACTIVE: Blocking entry signal for {symbol}")
+                    continue
+
                 if self.config.ANALYSIS_ONLY:
                     self.paper_manager.execute_signal(signal)
                     # Notify on Paper Trade? Maybe optionally.
@@ -336,7 +341,7 @@ class BotRunner:
                 "mode": "Paper" if self.config.ANALYSIS_ONLY else ("Testnet" if self.config.USE_TESTNET else "Live"),
                 "positions": positions,
                 "pending_orders": pending,
-                "history": history[-50:],  # last 50 trades
+                "history": history[:100],  # 100 newest trades
                 "regimes": self.current_regimes,
                 "prices": {s: round(p, 2) for s, p in current_prices.items()},
                 "iteration": self.iteration_count,

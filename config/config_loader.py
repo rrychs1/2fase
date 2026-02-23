@@ -30,6 +30,7 @@ class Config:
     
     # --- Operational ---
     POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
+    CANDLES_ANALYSIS_LIMIT = int(os.getenv('CANDLES_ANALYSIS_LIMIT', 200))
 
     # Timeframes
     TF_GRID = os.getenv('TF_GRID', '4h')

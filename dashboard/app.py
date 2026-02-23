@@ -96,7 +96,7 @@ def api_account():
         "unrealized_pnl": state.get("unrealized_pnl", 0),
         "positions": state.get("positions", {}),
         "pending_orders": state.get("pending_orders", []),
-        "history": history[-20:],
+        "history": history[:50],  # Show 50 newest trades
         "total_trades": total,
         "win_rate": round(win_rate, 1),
         "total_pnl": round(total_pnl, 2),
