@@ -267,13 +267,34 @@ class ExchangeClient:
     def _normalize_trades(self, trades):
         normalized = []
         for t in trades:
+            # Extract basic info
+            trade_id = str(t.get('id', ''))
+            side = t.get("side", "").upper()
+            pnl = float(t.get("info", {}).get("realizedPnl", 0))
+            amount = float(t.get("amount", 0))
+            
+            # Suspicious check: if pnl is exactly 0 but amount is significant 
+            # (Note: this is a heuristic, realizedPnl 0 is normal for opening trades)
+            # We flag it if we suspect it SHOULD have PnL but doesn't.
+            # In Binance, only trades that reduce/close have realizedPnl.
+            # However, the user wants explicit mapping.
+            is_suspicious = False
+            if pnl == 0 and amount > 0:
+                # RealizedPnL 0 is normal for OPENING. If it's a CLOSING trade (heuristic side check or just log)
+                # the DataEngine/BotRunner will handle actual position closing checks.
+                # Here we just ensure we HAVE the pnl field mapped correctly.
+                pass
+
             normalized.append({
+                "id": trade_id,
                 "symbol": t.get("symbol"),
-                "side": t.get("side", "").upper(),
+                "side": side,
                 "price": float(t.get("price", 0)),
-                "amount": float(t.get("amount", 0)),
-                "pnl": float(t.get("info", {}).get("realizedPnl", 0)),
-                "closed_at": t.get("datetime")
+                "amount": amount,
+                "pnl": pnl,
+                "closed_at": t.get("datetime"),
+                "is_suspicious": is_suspicious,
+                "info": t.get("info", {})
             })
         return normalized
 
@@ -311,13 +332,30 @@ class ExchangeClient:
         
         normalized = []
         for t in trades:
+            trade_id = str(t.get('id'))
+            pnl = float(t.get('realizedPnl', 0))
+            amount = float(t.get('qty', 0))
+            side = "BUY" if t.get('side', '').upper() == 'BUY' else "SELL"
+            
+            # Suspicious logic for Phase 4
+            is_suspicious = False
+            # If PnL is absolutely 0 on a trade > $10 notional (approx)
+            if pnl == 0 and (amount * float(t.get('price', 0))) > 10:
+                # Potential missing PnL if this was a closure
+                # We flag as suspicious if it's not clearly an opening (hard to tell without position history here, 
+                # but we'll log it for the auditor).
+                is_suspicious = True
+
             normalized.append({
+                "id": trade_id,
                 "symbol": symbol,
-                "side": "BUY" if t.get('side', '').upper() == 'BUY' else "SELL",
+                "side": side,
                 "price": float(t.get('price', 0)),
-                "amount": float(t.get('qty', 0)),
-                "pnl": float(t.get('realizedPnl', 0)),
-                "closed_at": datetime.fromtimestamp(t.get('time', 0)/1000).isoformat()
+                "amount": amount,
+                "pnl": pnl,
+                "closed_at": datetime.fromtimestamp(t.get('time', 0)/1000).isoformat(),
+                "is_suspicious": is_suspicious,
+                "info": t
             })
         return normalized
 

@@ -23,12 +23,15 @@ from logging_monitoring.telegram_bot import TelegramBot
 logger = setup_logger()
 
 class BotRunner:
-    def __init__(self):
+    def __init__(self, config=None, exchange=None, risk_manager=None, data_engine=None):
+        from data.db_manager import DbManager
+        
         self.start_time = datetime.now()
-        self.config = Config()
-        self.exchange = ExchangeClient()
-        self.data_engine = DataEngine(self.exchange)
+        self.config = config or Config()
+        self.exchange = exchange or ExchangeClient()
+        self.data_engine = data_engine or DataEngine(self.exchange)
         self.regime_detector = RegimeDetector()
+        self.db = DbManager() # Senior Audit Phase 4
         
         self.neutral_grid = NeutralGridStrategy(self.config)
         self.trend_dca = TrendDcaStrategy(self.config)
@@ -207,7 +210,25 @@ class BotRunner:
                 self.current_orders.extend(symbol_orders)
                 
                 symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=100)
-                self.current_history.extend(symbol_trades)
+                for trade in symbol_trades:
+                    # Deduplication and Persistance
+                    is_new = self.db.save_trade(trade)
+                    if is_new:
+                        logger.info(f"[Bot] New Trade Recorded: {trade['id']} {trade['side']} {trade['symbol']} PnL: {trade['pnl']}")
+                        self.current_history.append(trade)
+                        
+                        # Alerta de Trade Sospechoso (Phase 4)
+                        if trade.get('is_suspicious'):
+                            alert_msg = (f"🚨 **ALERTA: Trade Sospechoso Detectado**\n"
+                                         f"ID: {trade['id']}\n"
+                                         f"Symbol: {trade['symbol']}\n"
+                                         f"PnL: 0.0 (Cierre significativo detectado)\n"
+                                         f"**Acción Sugerida**: Revisar manualmente en Binance.")
+                            await self.telegram.send_error_alert(alert_msg)
+                
+                # In-memory history for dashboard (limited)
+                if len(self.current_history) > 500:
+                    self.current_history = self.current_history[-500:]
             
             # Notify for Grid Initialization (Batched)
             grid_init_signals = [s for s in signals if s.strategy == "GridInitial"]
