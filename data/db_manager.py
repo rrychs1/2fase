@@ -93,3 +93,31 @@ class DbManager:
         except Exception as e:
             logger.error(f"Error fetching recent trades: {e}")
             return []
+
+    def get_stats(self) -> dict:
+        """Calculate global trading statistics from the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Total Trades
+                cursor.execute('SELECT COUNT(*) FROM trades')
+                total_trades = cursor.fetchone()[0]
+                
+                # Total PnL
+                cursor.execute('SELECT SUM(realized_pnl) FROM trades')
+                total_pnl = cursor.fetchone()[0] or 0.0
+                
+                # Win Rate
+                cursor.execute('SELECT COUNT(*) FROM trades WHERE realized_pnl > 0')
+                wins = cursor.fetchone()[0]
+                win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+                
+                return {
+                    "total_trades": total_trades,
+                    "total_pnl": round(float(total_pnl), 2),
+                    "win_rate": round(float(win_rate), 1),
+                    "wins": wins
+                }
+        except Exception as e:
+            logger.error(f"Error calculating stats: {e}")
+            return {"total_trades": 0, "total_pnl": 0.0, "win_rate": 0.0, "wins": 0}

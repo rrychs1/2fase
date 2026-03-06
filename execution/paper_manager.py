@@ -198,3 +198,22 @@ class PaperManager:
         
         if keys_to_remove or orders_to_fill:
             self._save_state()
+
+    def append_equity_record(self, symbol, price, regime, signals_count, equity):
+        """Phase 17: Log equity data for performance tracking."""
+        try:
+            record_path = os.getenv("PAPERS_FILE", "data/papers.jsonl")
+            os.makedirs(os.path.dirname(record_path), exist_ok=True)
+            
+            record = {
+                "ts": datetime.now().isoformat(),
+                "symbol": symbol,
+                "price": round(price, 2),
+                "regime": regime,
+                "signals_count": signals_count,
+                "virtual_equity": round(equity, 2)
+            }
+            with open(record_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as e:
+            logger.warning(f"[PAPER] Failed to record equity: {e}")

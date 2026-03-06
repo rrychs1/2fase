@@ -27,9 +27,15 @@ def add_standard_indicators(df: pd.DataFrame) -> pd.DataFrame:
         if macds_key: df['MACD_signal'] = macd[macds_key]
         if macdh_key: df['MACD_hist'] = macd[macdh_key]
 
-    # RSI y ATR
+    # RSI, ATR y ADX
     df['RSI'] = ta.rsi(df['close'], length=14)
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    
+    adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+    if adx is not None and isinstance(adx, pd.DataFrame):
+        adx_key = next((k for k in adx.columns if k.startswith('ADX_')), None)
+        if adx_key: df['ADX'] = adx[adx_key]
+        else: df['ADX'] = adx.iloc[:, 0] # Fallback to first column
 
     # Bollinger Bands (identificación robusta por prefijos)
     bbands = ta.bbands(df['close'], length=20, std=2)

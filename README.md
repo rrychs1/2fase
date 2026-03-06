@@ -30,26 +30,50 @@ main.py → BotRunner (60s loop)
     └── ExecutionEngine (order placement)
 ```
 
-## 🚀 Inicio Rápido
+## 🚀 Despliegue con Docker (DigitalOcean)
 
-### 1. Clonar y preparar
+### 1. Preparar el Entorno
+- **Requisitos del Droplet**: 
+  - Recomendado: 1 vCPU, 1 GB RAM (mínimo).
+  - Ubuntu 22.04 LTS con Docker.
+- Configurar el **Firewall** del Droplet para permitir:
+  - `22 (SSH)`: Acceso remoto.
+  - `8000 (TCP)`: Dashboard.
+
+### 2. Desplegar
 ```bash
-cd binance_futures_bot
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r deployment/requirements.txt
+# Sube el código y configura .env
+cp .env.example .env 
+# Editar .env con tus credenciales
+
+# Iniciar servicios
+docker-compose up -d --build
 ```
 
-### 2. Configurar
-```bash
-cp .env.example .env
-# Editar .env con tus claves de Binance Futures Testnet
-```
+### 3. Comandos Útiles & Troubleshooting
+- **Ver logs unificados**: `docker-compose logs -f`
+- **Reiniciar solo el dashboard**: `docker-compose restart dashboard`
+- **Verificar salud**: `curl http://localhost:8000/dashboard/health`
+- **Métricas de operación**: `curl http://localhost:8000/api/metrics`
 
-### 3. Ejecutar
-```bash
-python main.py
-```
+## 🛡️ Resiliencia y Aislamiento de Procesos
+
+El sistema está diseñado siguiendo principios de **Ingeniería de Fiabilidad**:
+
+1.  **Aislamiento Total**: El bot de trading (`main.py`) y el dashboard (`run_dashboard.py`) corren como procesos independientes.
+    *   Si el dashboard falla o se reinicia, el bot mantiene sus órdenes y lógica sin interrupciones.
+    *   Si el bot se detiene por un error crítico, el dashboard seguirá mostrando el último estado conocido y el historial de alertas.
+2.  **Manejo de Datos Offline**: El dashboard lee estados de archivos `.json` y `.jsonl`. Si un archivo está corrupto o no existe, el dashboard muestra un estado vacío pero no se cae.
+3.  **Healthcheck**: El endpoint `/dashboard/health` permite que orquestadores (Docker, PM2) monitoreen la salud interna del servidor web.
+4.  **Historial Persistente**: Las alertas se guardan en `data/alerts.jsonl`, permitiendo auditoría retroactiva incluso tras reinicios.
+
+## ⚙️ Diferencias Local vs Cloud (.env)
+| Variable | Local (Desarrollo) | Cloud (Producción) |
+|----------|-------------------|-------------------|
+| `LOG_LEVEL` | `DEBUG` | `INFO` |
+| `LOG_TO_FILE` | `true` | `false` (usa `docker logs`) |
+| `DASHBOARD_HOST` | `127.0.0.1` | `0.0.0.0` |
+| `TRADING_ENV` | `TESTNET` | `LIVE` (cuando estés listo) |
 
 ## 📁 Estructura del Proyecto
 

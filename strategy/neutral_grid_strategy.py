@@ -44,11 +44,13 @@ class NeutralGridStrategy:
         vp = market_state.get('volume_profile')
         position_state = market_state.get('position')
         
-        logger.debug(f"[Grid] {symbol} Price: {current_price}")
+        logger.debug(f"[Grid] {symbol} Price: {current_price} | VA: {vp.val:.2f} - {vp.vah:.2f}")
         signals = []
         
         # 1. Check if we need to initialize or rebuild the grid
         state = self.grid_states.get(symbol)
+        if state and state.is_active:
+            logger.debug(f"[Grid] {symbol} Grid already active with {len(state.levels)} levels.")
         
         rebuild_needed = False
         if not state or not state.is_active:
@@ -58,7 +60,7 @@ class NeutralGridStrategy:
             # Track consecutive out-of-range checks
             self.consecutive_outside[symbol] = self.consecutive_outside.get(symbol, 0) + 1
             
-            if self.consecutive_outside[symbol] >= 2:
+            if self.consecutive_outside[symbol] >= 3:
                 # Check cooldown (10 minutes)
                 now = time.time()
                 last_rebuild = self.last_rebuild_time.get(symbol, 0)
@@ -78,7 +80,7 @@ class NeutralGridStrategy:
         if rebuild_needed:
             # Logic to cancel old grid and place new one
             equity = market_state.get('equity', 10000.0)
-            grid_budget = equity * 0.40 # Higher allocation for testnet notional compliance
+            grid_budget = equity * 0.20  # 20% allocation: safer sizing for testnet
             
             new_levels = self.generate_grid_levels(symbol, vp, grid_budget) 
             self.grid_states[symbol] = GridState(
@@ -100,6 +102,7 @@ class NeutralGridStrategy:
                     strategy="GridInitial",
                     confidence=0.9
                 ))
+            return signals
         else:
             # 2. Check for level crossings to "replenish" the grid
             if state and state.levels:

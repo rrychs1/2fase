@@ -25,10 +25,14 @@ class TrendDcaStrategy:
             return None
 
         # Bullish trend: EMA_fast > EMA_slow AND MACD > 0
-        if last_row['EMA_fast'] > last_row['EMA_slow'] and last_row['MACD'] > 0:
+        is_bullish = last_row['EMA_fast'] > last_row['EMA_slow'] and last_row['MACD'] > 0
+        is_bearish = last_row['EMA_fast'] < last_row['EMA_slow'] and last_row['MACD'] < 0
+        
+        logger.debug(f"[TrendDca] {symbol} Trend Check: EMA_f={last_row['EMA_fast']:.2f}, EMA_s={last_row['EMA_slow']:.2f}, MACD={last_row['MACD']:.4f}")
+        
+        if is_bullish:
             return Side.LONG
-        # Bearish trend: EMA_fast < EMA_slow AND MACD < 0
-        elif last_row['EMA_fast'] < last_row['EMA_slow'] and last_row['MACD'] < 0:
+        elif is_bearish:
             return Side.SHORT
         
         return None
@@ -39,7 +43,7 @@ class TrendDcaStrategy:
         Static 1.5% distance for simplicity, could be ATR-based.
         """
         levels = []
-        step_pct = 0.015 # 1.5% drop for DCA
+        step_pct = 0.010  # 1.0% — tighter DCA steps for testnet
         amount_per_step = total_amount / (self.config.DCA_STEPS + 1)
         
         for i in range(1, self.config.DCA_STEPS + 1):
@@ -54,11 +58,11 @@ class TrendDcaStrategy:
     def calculate_sl_tp(self, entry_price: float, side: Side, atr: float):
         """Calculate Stop Loss and Take Profit using ATR multiplier."""
         if side == Side.LONG:
-            sl = entry_price - (atr * 2.5)
-            tp = entry_price + (atr * 4.0)
+            sl = entry_price - (atr * 2.0)   # Tighter stop: 2.0×ATR
+            tp = entry_price + (atr * 3.5)   # Achievable target: 3.5×ATR
         else:
-            sl = entry_price + (atr * 2.5)
-            tp = entry_price - (atr * 4.0)
+            sl = entry_price + (atr * 2.0)
+            tp = entry_price - (atr * 3.5)
         return sl, tp
 
     async def on_new_candle(self, symbol: str, market_state: dict) -> list[Signal]:
@@ -80,7 +84,7 @@ class TrendDcaStrategy:
         # Current Price & Budget
         current_price = last_row['close']
         atr = last_row.get('ATR', 0.0)
-        total_amount = equity * 0.25 # Allocate 25% to this trend position (including DCA)
+        total_amount = equity * 0.15  # 15% allocation for trend + DCA (conservative for testnet)
 
         # 1. Logic for NEW Entries
         if not position_state or not position_state.get('is_active', False):
@@ -136,9 +140,9 @@ class TrendDcaStrategy:
                         dca_levels=dca_levels, stop_loss=sl, take_profit=tp, is_active=True
                     )
                 else:
-                    logger.info(f"[TrendDca] {symbol} Bearish trend. Waiting for pullback to {last_row['EMA_fast']:.2f}")
+                    logger.info(f"[TrendDca] {symbol} Bearish trend. EMA_f={last_row['EMA_fast']:.2f}, PrevHigh={prev_row['high']:.2f}. Waiting for pullback.")
             else:
-                logger.info(f"[TrendDca] {symbol} No clear trend.")
+                logger.debug(f"[TrendDca] {symbol} Neutral zone (No Trend).")
         
         # 2. Logic for EXISTING Positions (Exit & DCA)
         else:

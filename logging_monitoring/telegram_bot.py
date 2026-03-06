@@ -17,6 +17,8 @@ class TelegramBot:
         
         self.consecutive_failures = 0
         self.max_failures = 3
+        self.last_failure_ts = 0.0
+        self.health_retry_window = 300 # 5 minutes
         
         if not self.enabled:
             logger.warning("Telegram configuration missing. Notifications disabled.")
@@ -42,12 +44,24 @@ class TelegramBot:
             self.consecutive_failures = 0 # Reset on success
         except TelegramError as e:
             self.consecutive_failures += 1
+            self.last_failure_ts = time.time()
             logger.error(f"Failed to send Telegram message: {e} (failures: {self.consecutive_failures})")
 
     def is_healthy(self) -> bool:
-        """Check if the alert channel is functioning."""
+        """
+        Check if the alert channel is functioning.
+        Allows a retry attempt every health_retry_window if in a failed state.
+        """
         if not self.enabled: return False
-        return self.consecutive_failures < self.max_failures
+        if self.consecutive_failures < self.max_failures:
+            return True
+        
+        # If too many failures, allow a retry attempt every 5 minutes
+        import time
+        if time.time() - self.last_failure_ts > self.health_retry_window:
+            logger.info("[TELEGRAM] Health retry window reached. Allowing an attempt.")
+            return True
+        return False
 
     async def send_trade_alert(self, symbol: str, side: str, price: float, amount: float, strategy: str):
         """Send a formatted trade alert."""

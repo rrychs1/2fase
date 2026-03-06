@@ -15,6 +15,9 @@ class Config:
     # Support legacy USE_TESTNET flag
     USE_TESTNET = TRADING_ENV in ['TESTNET', 'DEMO'] or os.getenv('USE_TESTNET', 'True').lower() == 'true'
     
+    # Senior Audit Phase 17: Explicit flag for Paper Trading logic
+    PAPER_TRADING_ENABLED = os.getenv('PAPER_TRADING_ENABLED', 'True').lower() == 'true'
+    
     # Modo solo análisis: evita órdenes/apalancamiento hasta validar credenciales
     ANALYSIS_ONLY = os.getenv('ANALYSIS_ONLY', 'False').lower() == 'true'
     DRY_RUN = os.getenv('DRY_RUN', 'False').lower() == 'true'

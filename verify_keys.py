@@ -46,7 +46,7 @@ def verify_keys():
             r = requests.get(url, headers=headers, timeout=10)
             
             if r.status_code == 200:
-                print("✅ ¡ÉXITO! Conexión verificada correctamente en Testnet.")
+                print("[SUCCESS] ¡ÉXITO! Conexión verificada correctamente en Testnet.")
                 data = r.json()
                 # Buscar saldo USDT
                 usdt_balance = next((item for item in data if item["asset"] == "USDT"), None)
@@ -76,20 +76,20 @@ def verify_keys():
                         active_positions = [p for p in positions if float(p['positionAmt']) != 0]
                         if active_positions:
                             for p in active_positions:
-                                print(f"   🔴 {p['symbol']} | Cantidad: {p['positionAmt']} | Entry: {p['entryPrice']} | PnL: {p['unRealizedProfit']}")
+                                print(f"   [POS] {p['symbol']} | Cantidad: {p['positionAmt']} | Entry: {p['entryPrice']} | PnL: {p['unRealizedProfit']}")
                         else:
-                            print("   ✅ No hay posiciones abiertas.")
+                            print("   [OK] No hay posiciones abiertas.")
                     else:
-                        print(f"   ❌ Error al obtener posiciones: {r_pos.status_code}")
+                        print(f"   [ERROR] Error al obtener posiciones: {r_pos.status_code}")
                 except Exception as ex:
-                    print(f"   ❌ Excepción al buscar posiciones: {ex}")
+                    print(f"   [ERROR] Excepción al buscar posiciones: {ex}")
 
                 return
             else:
-                print(f"❌ Fallo en petición directa: {r.status_code}")
+                print(f"[ERROR] Fallo en petición directa: {r.status_code}")
                 print(f"   Respuesta: {r.text}")
         except Exception as e:
-            print(f"❌ Excepción en petición directa: {e}")
+            print(f"[ERROR] Excepción en petición directa: {e}")
 
     # Método 2: CCXT (Fallback o Mainnet)
     print(f"\n[2] Verificando con CCXT standard ({'Testnet' if use_testnet else 'Mainnet'})...")
@@ -109,11 +109,11 @@ def verify_keys():
             exchange.urls['api']['fapiPrivate'] = demo_fapi
         
         balance = exchange.fetch_balance()
-        print("✅ ¡ÉXITO! Conexión verificada con CCXT.")
+        print("[SUCCESS] ¡ÉXITO! Conexión verificada con CCXT.")
         print(f"   Saldo Total USDT: {balance['total'].get('USDT', 0)}")
         
     except Exception as e:
-        print(f"⚠️ CCXT Error (común en Testnet): {str(e)}")
+        print(f"[WARNING] CCXT Error (común en Testnet): {str(e)}")
         if use_testnet:
             print("   Nota: Si la verificación [1] funcionó, ignora este error de CCXT.")
 

@@ -21,6 +21,7 @@ class RiskManager:
         self.alert_throttle_seconds = 3600 # 1 hour default
         self.reconcile_interval = 20 # Every 20 iterations
         self.state_file = "risk_state.json"
+        self.cooldowns = {} # Map symbol -> timestamp_end
         self.load_state()
 
     def needs_reconciliation(self, iteration_count: int) -> bool:
@@ -46,8 +47,18 @@ class RiskManager:
             with open(self.state_file, 'r') as f:
                 state = json.load(f)
                 self.day_start_equity = float(state.get('day_start_equity', 0.0))
-                self.last_reset_date = date.fromisoformat(state.get('last_reset_date', str(date.today())))
+                saved_date = date.fromisoformat(state.get('last_reset_date', str(date.today())))
                 self.is_kill_switch_active = bool(state.get('is_kill_switch_active', False))
+
+                # Auto-reset kill switch on new day — prevents yesterday's state from blocking a new session
+                if saved_date < date.today():
+                    logger.info(f"[Risk] New day detected. Auto-resetting Kill Switch and day equity.")
+                    self.is_kill_switch_active = False
+                    self.day_start_equity = 0.0  # Will be re-anchored on first sync_reference_equity
+                    self.last_reset_date = date.today()
+                else:
+                    self.last_reset_date = saved_date
+
                 logger.info(f"[Risk] State loaded: day_start={self.day_start_equity}, kill_switch={self.is_kill_switch_active}")
         except Exception as e:
             logger.warning(f"[Risk] Failed to load state: {e}")
@@ -75,28 +86,31 @@ class RiskManager:
         drift_alert = False
         drift_val = 0.0
 
-        if equity is None or equity <= 0:
+        if not isinstance(equity, (int, float)):
+            logger.error(f"[Risk] Invalid equity type: {type(equity)}. Safeguarding.")
+            return drift_alert, 0.0
+
+        if equity <= 0:
             if not self.is_safe_mode:
                 logger.critical(f"[Risk] INVALID EQUITY DETECTED: {equity}. ACTIVATING SAFE MODE.")
                 self.is_safe_mode = True
             self.reference_equity = 0.0
             return drift_alert, 0.0
 
-        # Recovery from safe mode if equity becomes positive again (ONLY if it was due to invalid equity, not drift)
-        # For simplicity, we allow manual reset of is_safe_mode or recovery if equity > 0
+        # Recovery from safe mode if equity becomes positive again
         if self.is_safe_mode and equity > 0 and self.reference_equity == 0:
             logger.info(f"[Risk] Equity recovered to {equity}. Deactivating safe mode.")
             self.is_safe_mode = False
 
-        self.reference_equity = equity
+        self.reference_equity = float(equity)
         
         # Initialize day_start_equity if 0
         if self.day_start_equity <= 0:
-            self.day_start_equity = equity
+            self.day_start_equity = float(equity)
             self.save_state()
 
         # Monitor Drift
-        if self.last_cycle_equity > 0:
+        if self.last_cycle_equity > 0 and isinstance(self.last_cycle_equity, (int, float)):
             drift_val = abs(equity - self.last_cycle_equity) / self.last_cycle_equity
             if drift_val > self.drift_threshold:
                 logger.warning(f"[Risk] SIGNIFICANT EQUITY DRIFT: {drift_val*100:.2f}% "
@@ -106,7 +120,7 @@ class RiskManager:
                     self.is_safe_mode = True
                     drift_alert = True
         
-        self.last_cycle_equity = equity
+        self.last_cycle_equity = float(equity)
         return drift_alert, drift_val
 
     def calculate_position_size(self, symbol: str, entry_price: float, stop_loss: float, exchange_client=None) -> float:
@@ -120,8 +134,28 @@ class RiskManager:
             logger.warning(f"[Risk] {symbol} Skipping size calc: {reason}")
             return 0.0
 
+        # Check Cooldowns (Phase 26)
+        import time
+        now = time.time()
+        if symbol in self.cooldowns:
+            cd_end = self.cooldowns[symbol]
+            if now < cd_end:
+                rem = int(cd_end - now)
+                logger.info(f"[Risk] {symbol} blocked by COOLDOWN ({rem}s remaining)")
+                return 0.0
+            else:
+                # Cooldown expired
+                del self.cooldowns[symbol]
+
         risk_amount = equity * self.config.MAX_RISK_PER_TRADE
         
+        # Lead Developer Hardening: Type Guard (Task 3)
+        if not isinstance(entry_price, (int, float)) or (stop_loss is not None and not isinstance(stop_loss, (int, float))):
+            etype_entry = type(entry_price).__name__
+            etype_sl = type(stop_loss).__name__
+            logger.error(f"[Risk] TypeError Prevention: entry_price={etype_entry}, stop_loss={etype_sl}. Blocking trade.")
+            return 0.0
+
         if not stop_loss or entry_price == stop_loss:
             amount = risk_amount / entry_price
         else:
@@ -138,8 +172,10 @@ class RiskManager:
         if exchange_client:
             is_valid, reason = exchange_client.validate_order_filters(symbol, amount, entry_price)
             if not is_valid:
-                logger.warning(f"[Risk] {symbol} Order validation failed: {reason}. Returning 0 size.")
+                logger.warning(f"[Risk] {symbol} Order REJECTED by exchange filters: {reason}")
                 return 0.0
+            else:
+                logger.info(f"[Risk] {symbol} Size validated: {amount:.4f} units OK.")
             
         return amount
 
@@ -186,6 +222,12 @@ class RiskManager:
             self.last_kill_switch_alert = now
             return True
         return False
+
+    def trigger_cooldown(self, symbol: str, duration_seconds: int = 3600):
+        """Manual or automatic trigger of symbol-specific trading block."""
+        import time
+        self.cooldowns[symbol] = time.time() + duration_seconds
+        logger.warning(f"[Risk] {symbol} entered COOLDOWN for {duration_seconds}s")
 
     def enforce_leverage_and_margin(self, exchange_client, symbol):
         exchange_client.set_leverage(symbol, self.config.LEVERAGE)

@@ -27,6 +27,7 @@
                 <div class="header-meta">
                     <div>Uptime: <strong id="uptime">--</strong></div>
                     <div>Mode: <strong id="mode">--</strong></div>
+                    <div>Iteration: <strong id="iteration">--</strong></div>
                     <div>Last loop: <strong id="last-loop">--</strong></div>
                 </div>
             </div>
@@ -57,6 +58,54 @@
             <div class="card kpi-card">
                 <div id="kpi-winrate" class="kpi-value neutral">--</div>
                 <div class="kpi-label">Win Rate</div>
+            </div>
+        </section>
+
+        <!-- ═══ System Health ═══ -->
+        <section class="health-grid"
+            style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🤖</span> Operational Mode</div>
+                <div id="operational-status" class="health-indicators">
+                    <div class="health-item">
+                        <span>Trading:</span>
+                        <span id="op-trading" class="badge">--</span>
+                    </div>
+                    <div class="health-item">
+                        <span>Paper Mode:</span>
+                        <span id="op-paper" class="badge">--</span>
+                    </div>
+                    <div class="health-item"
+                        style="grid-column: span 2; margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px;">
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">Reason:</span>
+                        <div id="op-reason" style="font-size: 0.85rem; font-weight: 500; margin-top: 4px;">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title"><span class="icon">🏥</span> Connectivity</div>
+                <div class="health-indicators">
+                    <div class="health-item">
+                        <span>Exchange:</span>
+                        <span id="health-exchange" class="badge">--</span>
+                    </div>
+                    <div class="health-item">
+                        <span>Telegram:</span>
+                        <span id="health-telegram" class="badge">--</span>
+                    </div>
+                    <div class="health-item">
+                        <span>Loop:</span>
+                        <span id="health-loop" class="badge">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title"><span class="icon">⚠️</span> Last Error</div>
+                <div id="last-error-content" class="error-msg">
+                    <span class="empty-state">No errors reported in this session.</span>
+                </div>
             </div>
         </section>
 
@@ -148,6 +197,29 @@
                         <tbody id="trades-body">
                             <tr>
                                 <td colspan="4" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Recent Alerts ═══ -->
+        <section style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🔔</span> Recent Notifications (Telegram)</div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 15%;">Time</th>
+                                <th style="width: 15%;">Level</th>
+                                <th>Alert Description</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-body">
+                            <tr>
+                                <td colspan="3" class="empty-state">Waiting for updates...</td>
                             </tr>
                         </tbody>
                     </table>

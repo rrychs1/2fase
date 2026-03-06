@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: trading-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python -u main.py
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, time; path='status.json'; exit(0) if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < 180 else exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  dashboard:
+    build: .
+    container_name: trading-dashboard
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUNBUFFERED=1
+      - DASHBOARD_HOST=0.0.0.0
+    ports:
+      - "${DASHBOARD_PORT:-8000}:${DASHBOARD_PORT:-8000}"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python -u run_dashboard.py --no-browser
+    depends_on:
+      - trading-bot
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${DASHBOARD_PORT:-8000}/dashboard/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -49,25 +49,102 @@ function animateValue(id, start, end, duration, isCurrency = true) {
 // ─────────────────────────── Status header ───────────────────
 function renderStatus(data) {
     const badge = document.getElementById('status-badge');
-    const uptimeEl = document.getElementById('uptime');
+    const iterationEl = document.getElementById('iteration');
     const modeEl = document.getElementById('mode');
-    const lastLoopEl = document.getElementById('last-loop');
 
-    if (!data || !data.status) {
+    if (!data || data.status === undefined) {
         badge.className = 'status-badge offline';
-        badge.innerHTML = '<span class="status-dot"></span> Offline';
+        badge.innerHTML = '<span class="status-dot"></span> Disconnected';
         return;
     }
 
-    // Check if bot is stale (no update in > 3 minutes)
+    // Senior Hardening: Use is_active from backend + local secondary check
     const lastLoop = new Date(data.last_loop);
-    const isStale = (Date.now() - lastLoop.getTime()) > 180_000;
+    const localStale = (Date.now() - lastLoop.getTime()) > 120_000;
+    const isActive = data.is_active && !localStale;
 
-    badge.className = isStale ? 'status-badge offline' : 'status-badge';
-    badge.innerHTML = `<span class="status-dot"></span> ${isStale ? 'Stale' : data.status}`;
-    uptimeEl.textContent = data.uptime || '--';
-    modeEl.textContent = data.mode || '--';
+    if (isActive) {
+        badge.className = 'status-badge';
+        badge.innerHTML = '<span class="status-dot"></span> Running';
+    } else {
+        badge.className = 'status-badge offline';
+        badge.innerHTML = `<span class="status-dot"></span> ${data.status === 'Offline' ? 'Stopped' : 'Stalled'}`;
+    }
+
     lastLoopEl.textContent = lastLoop.toLocaleTimeString() || '--';
+    if (iterationEl) iterationEl.textContent = data.iteration || '0';
+    if (modeEl) modeEl.textContent = data.mode || 'Unknown';
+
+    // Phase 19: Health Rendering
+    renderHealth(data);
+}
+
+function renderHealth(data) {
+    const exchangeEl = document.getElementById('health-exchange');
+    const telegramEl = document.getElementById('health-telegram');
+    const errorCont = document.getElementById('last-error-content');
+
+    if (!data) return;
+
+    // Exchange Status
+    if (exchangeEl) {
+        const exStatus = data.exchange_status || 'Unknown';
+        exchangeEl.textContent = exStatus;
+        exchangeEl.className = `badge ${exStatus === 'Connected' ? 'healthy' : 'critical'}`;
+    }
+
+    // Telegram Status
+    if (telegramEl) {
+        const telHealthy = data.telegram_healthy !== false;
+        telegramEl.textContent = telHealthy ? 'Healthy' : 'Error';
+        telegramEl.className = `badge ${telHealthy ? 'healthy' : 'critical'}`;
+    }
+
+    // Loop Status
+    const loopEl = document.getElementById('health-loop');
+    if (loopEl) {
+        const lastLoop = new Date(data.last_loop);
+        const localStale = (Date.now() - lastLoop.getTime()) > 120_000;
+        const isActive = data.is_active && !localStale;
+        loopEl.textContent = isActive ? 'Active' : (data.status === 'Offline' ? 'Stopped' : 'Stalled');
+        loopEl.className = `badge ${isActive ? 'healthy' : 'critical'}`;
+    }
+
+    // Phase 22: Detailed Operational Status
+    const botStatus = data.bot_status || {};
+    const opTrading = document.getElementById('op-trading');
+    const opPaper = document.getElementById('op-paper');
+    const opReason = document.getElementById('op-reason');
+
+    if (opTrading) {
+        const trading = botStatus.trading_enabled !== false;
+        opTrading.textContent = trading ? 'ENABLED' : 'BLOCKED';
+        opTrading.className = `badge ${trading ? 'healthy' : 'critical'}`;
+    }
+    if (opPaper) {
+        const paper = botStatus.paper_trading_enabled === true;
+        opPaper.textContent = paper ? 'YES' : 'LIVE';
+        opPaper.className = `badge ${paper ? 'warning' : 'healthy'}`;
+    }
+    if (opReason) {
+        opReason.textContent = botStatus.last_change_reason || 'System operational';
+        opReason.style.color = botStatus.trading_enabled === false ? 'var(--accent-red)' : 'var(--accent-green)';
+    }
+
+    // Last Error Display
+    if (errorCont) {
+        if (data.last_error) {
+            const err = data.last_error;
+            const errTime = new Date(err.ts).toLocaleTimeString();
+            errorCont.innerHTML = `
+                <strong>${err.type}</strong>: ${err.msg}
+                <span class="error-time">Ocurrido a las ${errTime}</span>
+            `;
+            errorCont.style.color = 'var(--accent-red)';
+        } else {
+            errorCont.innerHTML = '<span class="empty-state">No critical errors reported in this session.</span>';
+        }
+    }
 }
 
 // ─────────────────────────── KPI Cards ───────────────────────
@@ -278,6 +355,29 @@ function renderRegimeInfo(account) {
     }).join('');
 }
 
+// ─────────────────────────── Alerts ──────────────────────────
+function renderAlerts(alerts) {
+    const body = document.getElementById('alerts-body');
+    if (!alerts || alerts.length === 0) {
+        body.innerHTML = '<tr><td colspan="3" class="empty-state">No recent notifications.</td></tr>';
+        return;
+    }
+
+    body.innerHTML = alerts.map(a => {
+        const time = new Date(a.ts).toLocaleTimeString();
+        let levelClass = 'badge-neutral';
+        if (a.level === 'ERROR' || a.level === 'CRITICAL') levelClass = 'badge-critical';
+        else if (a.level === 'WARNING') levelClass = 'badge-warning';
+        else if (a.level === 'TRADE') levelClass = 'badge-trend';
+
+        return `<tr>
+            <td><span class="text-dimmed">${time}</span></td>
+            <td><span class="badge ${levelClass}">${a.level}</span></td>
+            <td style="font-size: 0.9rem;">${a.msg}</td>
+        </tr>`;
+    }).join('');
+}
+
 // ─────────────────────────── Log Viewer ──────────────────────
 function renderLogs(lines) {
     const viewer = document.getElementById('log-viewer');
@@ -317,11 +417,12 @@ function startRefreshBar() {
 // ─────────────────────────── Master refresh ──────────────────
 async function refreshAll() {
     startRefreshBar();
-    const [status, account, equity, logs] = await Promise.all([
+    const [status, account, equity, logs, alerts] = await Promise.all([
         fetchJSON('/api/status'),
         fetchJSON('/api/account'),
         fetchJSON('/api/equity-history'),
         fetchJSON('/api/logs'),
+        fetchJSON('/api/alerts')
     ]);
 
     renderStatus(status);
@@ -332,6 +433,7 @@ async function refreshAll() {
     renderTrades(account?.history);
     renderRegimeInfo(account);
     renderLogs(logs);
+    renderAlerts(alerts);
 }
 
 // ─────────────────────────── Init ────────────────────────────

@@ -624,13 +624,24 @@ class ExchangeClient:
 
     def amount_to_precision(self, symbol, amount):
         try:
-            # If markets were manually injected, CCXT will use them
+            market = self.exchange.markets.get(symbol)
+            if market and 'limits' in market:
+                step = market['limits']['amount'].get('step', 0.0001)
+                rounded = round(round(float(amount) / step) * step, 8)
+                precision = market['precision'].get('amount', 3)
+                return f"{rounded:.{precision}f}"
             return self.exchange.amount_to_precision(symbol, amount)
         except Exception:
-            return str(round(amount, 3)) # Safe fallback
+            return str(round(amount, 3))
 
     def price_to_precision(self, symbol, price):
         try:
+            market = self.exchange.markets.get(symbol)
+            if market and 'limits' in market:
+                tick = market['limits']['price'].get('tick', 0.01)
+                rounded = round(round(float(price) / tick) * tick, 8)
+                precision = market['precision'].get('price', 2)
+                return f"{rounded:.{precision}f}"
             return self.exchange.price_to_precision(symbol, price)
         except Exception:
-            return str(round(price, 2)) # Safe fallback
+            return str(round(price, 2))

@@ -12,7 +12,8 @@ class StrategyRouter:
                 symbol, 
                 market_state
             )
-            signals.extend(grid_signals)
+            if grid_signals:
+                signals.extend(grid_signals)
             
         elif regime == "trend":
             # Prioritize Trend DCA

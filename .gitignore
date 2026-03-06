@@ -1,5 +1,6 @@
 # Environment variables (NEVER commit)
 .env
+.env.production
 
 # Python
 __pycache__/
@@ -22,30 +23,33 @@ ENV/
 *.swp
 *.swo
 
-# Logs and data
+# Logs and runtime data
 logs/
 *.log
-papers.jsonl
+risk_state.json
 status.json
-virtual_account.json
 dashboard_state.json
+virtual_account.json
+data/*.db
+
+# Large data files
+papers.jsonl
 analytics/reports/
 backtesting/data_cache/
 backtesting/reports/
 
-# Temporary and Debug files
+# Debug / temp files
+t*.txt
 *.txt
-test_*.py
-verify_*.py
-analyze_logs.py
-check_trades.py
-debug_result.txt
 analysis_results.txt
 backtest_error.txt
 log_analysis_report.txt
-pytest.ini
-.pytest_cache/
+bot_output.txt
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent artifacts
+.agent/
+.pytest_cache/
