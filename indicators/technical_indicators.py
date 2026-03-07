@@ -1,5 +1,8 @@
 import pandas as pd
-import pandas_ta as ta
+import ta.trend as trend_i
+import ta.momentum as momentum_i
+import ta.volatility as volatility_i
+
 
 def add_standard_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Defensas por si el DF está vacío o le faltan columnas
@@ -7,56 +10,37 @@ def add_standard_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame) or len(df) == 0 or not required_cols.issubset(df.columns):
         return df
 
+    close = df['close']
+    high  = df['high']
+    low   = df['low']
+
     # EMAs
-    df['EMA_fast'] = ta.ema(df['close'], length=50)
-    df['EMA_slow'] = ta.ema(df['close'], length=200)
+    df['EMA_fast'] = trend_i.EMAIndicator(close=close, window=50).ema_indicator()
+    df['EMA_slow'] = trend_i.EMAIndicator(close=close, window=200).ema_indicator()
 
-    # MACD (identificación robusta por prefijos)
-    macd = ta.macd(df['close'])
-    if macd is not None and isinstance(macd, pd.DataFrame):
-        macd_cols = macd.columns
-        # Buscar columnas que empiezan por MACD_, MACDs_, MACDh_
-        macd_key = next((k for k in macd_cols if k.startswith('MACD_') and not k.startswith('MACDs_') and not k.startswith('MACDh_')), None)
-        # Si no hay uno con guion bajo, buscar el exacto "MACD"
-        if not macd_key: macd_key = 'MACD' if 'MACD' in macd_cols else None
-        
-        macds_key = next((k for k in macd_cols if k.startswith('MACDs_')), None)
-        macdh_key = next((k for k in macd_cols if k.startswith('MACDh_')), None)
-        
-        if macd_key: df['MACD'] = macd[macd_key]
-        if macds_key: df['MACD_signal'] = macd[macds_key]
-        if macdh_key: df['MACD_hist'] = macd[macdh_key]
+    # MACD
+    macd_obj = trend_i.MACD(close=close)
+    df['MACD']        = macd_obj.macd()
+    df['MACD_signal']  = macd_obj.macd_signal()
+    df['MACD_hist']    = macd_obj.macd_diff()
 
-    # RSI, ATR y ADX
-    df['RSI'] = ta.rsi(df['close'], length=14)
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    
-    adx = ta.adx(df['high'], df['low'], df['close'], length=14)
-    if adx is not None and isinstance(adx, pd.DataFrame):
-        adx_key = next((k for k in adx.columns if k.startswith('ADX_')), None)
-        if adx_key: df['ADX'] = adx[adx_key]
-        else: df['ADX'] = adx.iloc[:, 0] # Fallback to first column
+    # RSI
+    df['RSI'] = momentum_i.RSIIndicator(close=close, window=14).rsi()
 
-    # Bollinger Bands (identificación robusta por prefijos)
-    bbands = ta.bbands(df['close'], length=20, std=2)
-    if bbands is not None and isinstance(bbands, pd.DataFrame):
-        b_cols = bbands.columns
-        bbl_key = next((k for k in b_cols if k.startswith('BBL_')), None)
-        bbu_key = next((k for k in b_cols if k.startswith('BBU_')), None)
-        bbb_key = next((k for k in b_cols if k.startswith('BBB_')), None) # Bandwidth column
-        
-        if bbl_key: df['BB_lower'] = bbands[bbl_key]
-        if bbu_key: df['BB_upper'] = bbands[bbu_key]
-        
-        if bbb_key:
-            # Usar el ancho de banda calculado por la librería (suele ser en porcentaje)
-            # pandas_ta lo devuelve como (Upper - Lower) / Mid * 100 o similar.
-            # Nosotros queremos (Upper - Lower) / close para consistencia con el detector.
-            df['BB_width'] = bbands[bbb_key] / 100.0 if bbands[bbb_key].mean() > 1.0 else bbands[bbb_key]
-        elif bbu_key and bbl_key:
-            with pd.option_context('mode.use_inf_as_na', True):
-                df['BB_width'] = (df['BB_upper'] - df['BB_lower']) / df['close']
+    # ATR
+    df['ATR'] = volatility_i.AverageTrueRange(
+        high=high, low=low, close=close, window=14
+    ).average_true_range()
 
-    return df
+    # ADX
+    adx_obj = trend_i.ADXIndicator(high=high, low=low, close=close, window=14)
+    df['ADX'] = adx_obj.adx()
+
+    # Bollinger Bands
+    bb_obj = volatility_i.BollingerBands(close=close, window=20, window_dev=2)
+    df['BB_lower'] = bb_obj.bollinger_lband()
+    df['BB_upper'] = bb_obj.bollinger_hband()
+    # Bandwidth: (upper - lower) / close  — mismo criterio que antes
+    df['BB_width'] = bb_obj.bollinger_wband()
 
     return df
