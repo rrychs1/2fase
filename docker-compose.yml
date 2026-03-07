@@ -10,6 +10,7 @@ services:
     environment:
       - PYTHONIOENCODING=utf-8
       - PYTHONUNBUFFERED=1
+      - STATE_FILE=data/dashboard_state.json
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -31,6 +32,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - PYTHONUNBUFFERED=1
       - DASHBOARD_HOST=0.0.0.0
+      - STATE_FILE=data/dashboard_state.json
     ports:
       - "${DASHBOARD_PORT:-8000}:${DASHBOARD_PORT:-8000}"
     volumes:

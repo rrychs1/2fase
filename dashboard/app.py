@@ -4,6 +4,7 @@ Reads unified dashboard_state.json + papers.jsonl + logs.
 """
 import json
 import os
+import sqlite3
 from flask import Flask, render_template, jsonify
 from collections import deque
 
@@ -17,7 +18,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # Load paths from env or defaults
-STATE_FILE = os.getenv("STATE_FILE", "dashboard_state.json")
+STATE_FILE = os.getenv("STATE_FILE", "data/dashboard_state.json")
 DB_PATH = os.getenv("DB_PATH", "data/trading_v3.db")
 LOG_FILE = os.getenv("LOG_FILE", "logs/bot.log")
 PAPERS_FILE = os.getenv("PAPERS_FILE", "papers.jsonl")
@@ -65,6 +66,82 @@ def _read_jsonl(filename, max_lines=500):
     except Exception:
         pass
     return list(data)
+
+
+def _state_is_fresh(filename, max_age_s=120):
+    """Return True if the state file exists and was written within max_age_s seconds."""
+    path = _get_abs_path(filename)
+    if not os.path.exists(path):
+        return False
+    try:
+        age = (datetime.datetime.now() - datetime.datetime.fromtimestamp(os.path.getmtime(path))).total_seconds()
+        return age < max_age_s
+    except Exception:
+        return False
+
+
+def _read_db_account():
+    """Fallback: read balance/equity/trades directly from trading_v3.db."""
+    db_path = _get_abs_path(DB_PATH)
+    if not os.path.exists(db_path):
+        return {}
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Latest balance snapshot (table may not exist yet)
+        balance, equity = 0.0, 0.0
+        try:
+            row = cur.execute(
+                "SELECT balance, equity FROM account_snapshots ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                balance = float(row["balance"] or 0)
+                equity  = float(row["equity"] or 0)
+        except Exception:
+            pass
+
+        # Recent trades
+        history = []
+        total_pnl = 0.0
+        wins = 0
+        try:
+            rows = cur.execute(
+                "SELECT * FROM trades ORDER BY closed_at DESC LIMIT 100"
+            ).fetchall()
+            for r in rows:
+                t = dict(r)
+                pnl = float(t.get("realized_pnl") or t.get("pnl") or 0)
+                t["pnl"] = pnl
+                total_pnl += pnl
+                if pnl > 0:
+                    wins += 1
+                history.append(t)
+        except Exception:
+            pass
+
+        conn.close()
+
+        total = len(history)
+        win_rate = round(wins / total * 100, 1) if total > 0 else 0.0
+        return {
+            "balance":      round(balance, 2),
+            "equity":       round(equity or balance, 2),
+            "unrealized_pnl": round((equity or balance) - balance, 2),
+            "positions":    {},
+            "pending_orders": [],
+            "history":      history[:50],
+            "total_trades": total,
+            "win_rate":     win_rate,
+            "total_pnl":    round(total_pnl, 2),
+            "regimes":      {},
+            "prices":       {},
+            "mode":         "Live",
+        }
+    except Exception as e:
+        print(f"[DASHBOARD] DB fallback error: {e}")
+        return {}
 
 
 def _read_log_tail(filename=None, n=80):
@@ -129,41 +206,45 @@ def api_status():
 
 @app.route("/api/account")
 def api_account():
-    # Read from unified dashboard_state.json (written by bot each iteration)
-    state = _read_json(STATE_FILE)
+    # Prefer fresh dashboard_state.json; fall back to DB then virtual_account.json
+    if _state_is_fresh(STATE_FILE):
+        state = _read_json(STATE_FILE)
+    else:
+        # State file missing or stale — try SQLite directly
+        state = _read_db_account()
+        if not state:
+            state = _read_json("virtual_account.json")
 
     if not state:
-        # Fallback to legacy virtual_account.json
-        state = _read_json("virtual_account.json")
+        state = {}
 
     history = state.get("history", [])
-    
-    # Phase 4+: Use persistent global stats if available
+
+    # Use persistent global stats if available (written by bot)
     global_stats = state.get("global_stats", {})
     if global_stats:
-        total = global_stats.get("total_trades", len(history))
-        win_rate = global_stats.get("win_rate", 0)
+        total     = global_stats.get("total_trades", len(history))
+        win_rate  = global_stats.get("win_rate", 0)
         total_pnl = global_stats.get("total_pnl", 0)
     else:
-        # Fallback to calculation from the available history slice
-        total = len(history)
-        wins = sum(1 for t in history if t.get("pnl", 0) > 0)
+        total     = len(history)
+        wins      = sum(1 for t in history if t.get("pnl", 0) > 0)
         total_pnl = sum(t.get("pnl", 0) for t in history)
-        win_rate = (wins / total * 100) if total > 0 else 0
+        win_rate  = (wins / total * 100) if total > 0 else 0
 
     return jsonify({
-        "balance": state.get("balance", 0),
-        "equity": state.get("equity", state.get("balance", 0)),
+        "balance":        state.get("balance", 0),
+        "equity":         state.get("equity", state.get("balance", 0)),
         "unrealized_pnl": state.get("unrealized_pnl", 0),
-        "positions": state.get("positions", {}),
+        "positions":      state.get("positions", {}),
         "pending_orders": state.get("pending_orders", []),
-        "history": history[:50],  # Show 50 newest trades
-        "total_trades": total,
-        "win_rate": round(win_rate, 1),
-        "total_pnl": round(total_pnl, 2),
-        "regimes": state.get("regimes", {}),
-        "prices": state.get("prices", {}),
-        "mode": state.get("mode", "Unknown"),
+        "history":        history[:50],
+        "total_trades":   total,
+        "win_rate":       round(win_rate, 1),
+        "total_pnl":      round(total_pnl, 2),
+        "regimes":        state.get("regimes", {}),
+        "prices":         state.get("prices", {}),
+        "mode":           state.get("mode", "Unknown"),
     })
 
 
@@ -231,27 +312,20 @@ def api_metrics():
 def healthcheck():
     """Healthcheck endpoint for Docker/DigitalOcean."""
     try:
-        path = _get_abs_path(STATE_FILE)
-        state_ok = os.path.exists(path)
         db_path = _get_abs_path(DB_PATH)
-        db_ok = os.path.exists(db_path)
-        
-        # Check if we can reach the bot state
-        can_read = False
-        if state_ok:
-            try:
-                with open(path, "r") as f:
-                    json.load(f)
-                can_read = True
-            except: pass
+        db_ok   = os.path.exists(db_path)
+
+        # State is considered readable only if it exists AND is fresh
+        can_read = _state_is_fresh(STATE_FILE)
 
         return jsonify({
-            "status": "healthy",
-            "timestamp": datetime.datetime.now().isoformat(),
-            "can_read_bot_state": can_read,
-            "database_ok": db_ok,
-            "telegram_service_reachable": True, # Dashboard can't check directly easily, so assume OK if server alive
-            "system": "resilient"
+            "status":                    "healthy",
+            "timestamp":                 datetime.datetime.now().isoformat(),
+            "can_read_bot_state":        can_read,
+            "state_file":                _get_abs_path(STATE_FILE),
+            "database_ok":               db_ok,
+            "telegram_service_reachable": True,
+            "system":                    "resilient"
         }), 200
     except Exception as e:
         return jsonify({"status": "degraded", "error": str(e)}), 200
