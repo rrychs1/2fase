@@ -1,23 +1,65 @@
-venv/
+# ═══════════════════════════════════════════════════════════════
+#  .dockerignore — keep the build context small and secure
+# ═══════════════════════════════════════════════════════════════
+#
+#  IMPORTANT: Never add *.txt here — it blocks requirements.txt!
+#
+
+# ── Version control ──
+.git/
+.gitignore
+
+# ── Python bytecode & packaging ──
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+dist/
+build/
+eggs/
+
+# ── Virtual environments (local dev only) ──
+venv/
+.venv/
+ENV/
+
+# ── Environment / secrets (loaded at runtime via env_file) ──
 .env
 .env.production
-.git/
-.gitignore
+# NOTE: .env.example IS included (useful as reference inside container)
+
+# ── IDE / editor ──
+.agent/
+.agents/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Testing (not needed in production image) ──
+.pytest_cache/
+tests/
+pytest.ini
+
+# ── Logs (mounted as volume, not baked into image) ──
 logs/
-*.log
-papers.jsonl
-risk_state.json
-status.json
-virtual_account.json
-dashboard_state.json
-data/*.db
+
+# ── Backups (server-side only) ──
+backups/
+
+# ── Caches & reports (large, not needed at runtime) ──
 backtesting/data_cache/
 backtesting/reports/
 analytics/reports/
-.agent/
-.pytest_cache/
-t*.txt
-*.txt
+
+# ── Documentation (not needed in the image) ──
+DEPLOY.md
+README.md
+deployment/RUNBOOK.md
+
+# ── Docker meta files (avoid recursive copy) ──
+Dockerfile
+docker-compose.yml
+.dockerignore

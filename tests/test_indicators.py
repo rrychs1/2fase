@@ -65,7 +65,7 @@ class TestRegimeDetector:
         np.random.seed(99)
         n = 300
         # Exponential uptrend with increasing volatility (proportional to price)
-        base = 50000 * np.exp(np.linspace(0, 1.0, n))  # ~50k to ~136k
+        base = 50000 * np.exp(np.linspace(0, 1.5, n))  # Increased steepness to ensure EMA diff > 2%
         # Noise proportional to price so BB_width grows with price
         noise = np.random.normal(0, 1, n) * base * 0.01
         price = base + noise

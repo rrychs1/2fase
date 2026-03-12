@@ -44,3 +44,8 @@ class Config:
     GRID_LEVELS = 5
     DCA_STEPS = 3
     ATR_PERIOD = 14
+
+    # --- Optional Services ---
+    TELEGRAM_ENABLED = os.getenv('TELEGRAM_ENABLED', 'true').lower() == 'true'
+    DASHBOARD_ENABLED = os.getenv('DASHBOARD_ENABLED', 'true').lower() == 'true'
+    DASHBOARD_PORT = int(os.getenv('DASHBOARD_PORT', 8000))

@@ -89,7 +89,7 @@ def main():
     else:
         logger.info("Skipping HTML report (--no-report flag)")
 
-    print("\n✅ Backtest complete!\n")
+    print("\n[+] Backtest complete!\n")
 
 
 if __name__ == "__main__":

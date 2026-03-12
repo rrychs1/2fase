@@ -26,6 +26,7 @@ ENV/
 # Logs and runtime data
 logs/
 *.log
+backups/
 risk_state.json
 status.json
 dashboard_state.json
@@ -33,7 +34,7 @@ virtual_account.json
 data/*.db
 
 # Large data files
-papers.jsonl
+*.jsonl
 analytics/reports/
 backtesting/data_cache/
 backtesting/reports/

@@ -1,5 +1,6 @@
 /**
  * Trading Bot Dashboard — Client-side logic
+ * Calls /api/state + /api/metrics for guaranteed-schema JSON.
  * Auto-refreshes every 10 seconds, renders Chart.js equity chart + tables.
  */
 
@@ -22,7 +23,6 @@ function animateValue(id, start, end, duration, isCurrency = true) {
     const obj = document.getElementById(id);
     if (!obj) return;
 
-    // Skip animation if values are the same
     const currentVal = parseFloat(obj.getAttribute('data-value') || '0');
     if (Math.abs(currentVal - end) < 0.01) return;
     obj.setAttribute('data-value', end);
@@ -47,55 +47,62 @@ function animateValue(id, start, end, duration, isCurrency = true) {
 }
 
 // ─────────────────────────── Status header ───────────────────
-function renderStatus(data) {
+function renderStatus(state) {
     const badge = document.getElementById('status-badge');
+    const lastLoopEl = document.getElementById('last-loop');
     const iterationEl = document.getElementById('iteration');
     const modeEl = document.getElementById('mode');
+    const uptimeEl = document.getElementById('uptime');
 
-    if (!data || data.status === undefined) {
+    if (!state || !state.has_data) {
         badge.className = 'status-badge offline';
         badge.innerHTML = '<span class="status-dot"></span> Disconnected';
+        if (lastLoopEl) lastLoopEl.textContent = '--';
+        if (iterationEl) iterationEl.textContent = '0';
+        if (modeEl) modeEl.textContent = '--';
+        if (uptimeEl) uptimeEl.textContent = '--';
         return;
     }
 
-    // Senior Hardening: Use is_active from backend + local secondary check
-    const lastLoop = new Date(data.last_loop);
-    const localStale = (Date.now() - lastLoop.getTime()) > 120_000;
-    const isActive = data.is_active && !localStale;
+    // Double-check freshness: backend says running + local staleness check
+    const lastLoop = state.last_loop_ts ? new Date(state.last_loop_ts) : null;
+    const localStale = lastLoop ? (Date.now() - lastLoop.getTime()) > 120_000 : true;
+    const isActive = state.running && !localStale;
 
     if (isActive) {
         badge.className = 'status-badge';
         badge.innerHTML = '<span class="status-dot"></span> Running';
     } else {
         badge.className = 'status-badge offline';
-        badge.innerHTML = `<span class="status-dot"></span> ${data.status === 'Offline' ? 'Stopped' : 'Stalled'}`;
+        badge.innerHTML = `<span class="status-dot"></span> ${state.running ? 'Stalled' : 'Stopped'}`;
     }
 
-    lastLoopEl.textContent = lastLoop.toLocaleTimeString() || '--';
-    if (iterationEl) iterationEl.textContent = data.iteration || '0';
-    if (modeEl) modeEl.textContent = data.mode || 'Unknown';
+    if (lastLoopEl) lastLoopEl.textContent = lastLoop ? lastLoop.toLocaleTimeString() : '--';
+    if (iterationEl) iterationEl.textContent = state.iteration || '0';
+    if (modeEl) modeEl.textContent = state.mode || 'Unknown';
+    if (uptimeEl) uptimeEl.textContent = state.uptime || '--';
 
-    // Phase 19: Health Rendering
-    renderHealth(data);
+    // Health & operational panels
+    renderHealth(state);
 }
 
-function renderHealth(data) {
+function renderHealth(state) {
     const exchangeEl = document.getElementById('health-exchange');
     const telegramEl = document.getElementById('health-telegram');
     const errorCont = document.getElementById('last-error-content');
 
-    if (!data) return;
+    if (!state) return;
 
     // Exchange Status
     if (exchangeEl) {
-        const exStatus = data.exchange_status || 'Unknown';
+        const exStatus = state.exchange_status || 'Unknown';
         exchangeEl.textContent = exStatus;
         exchangeEl.className = `badge ${exStatus === 'Connected' ? 'healthy' : 'critical'}`;
     }
 
     // Telegram Status
     if (telegramEl) {
-        const telHealthy = data.telegram_healthy !== false;
+        const telHealthy = state.telegram_healthy !== false;
         telegramEl.textContent = telHealthy ? 'Healthy' : 'Error';
         telegramEl.className = `badge ${telHealthy ? 'healthy' : 'critical'}`;
     }
@@ -103,15 +110,15 @@ function renderHealth(data) {
     // Loop Status
     const loopEl = document.getElementById('health-loop');
     if (loopEl) {
-        const lastLoop = new Date(data.last_loop);
-        const localStale = (Date.now() - lastLoop.getTime()) > 120_000;
-        const isActive = data.is_active && !localStale;
-        loopEl.textContent = isActive ? 'Active' : (data.status === 'Offline' ? 'Stopped' : 'Stalled');
+        const lastLoop = state.last_loop_ts ? new Date(state.last_loop_ts) : null;
+        const localStale = lastLoop ? (Date.now() - lastLoop.getTime()) > 120_000 : true;
+        const isActive = state.running && !localStale;
+        loopEl.textContent = isActive ? 'Active' : (state.running ? 'Stalled' : 'Stopped');
         loopEl.className = `badge ${isActive ? 'healthy' : 'critical'}`;
     }
 
-    // Phase 22: Detailed Operational Status
-    const botStatus = data.bot_status || {};
+    // Operational Status
+    const botStatus = state.bot_status || {};
     const opTrading = document.getElementById('op-trading');
     const opPaper = document.getElementById('op-paper');
     const opReason = document.getElementById('op-reason');
@@ -133,11 +140,11 @@ function renderHealth(data) {
 
     // Last Error Display
     if (errorCont) {
-        if (data.last_error) {
-            const err = data.last_error;
-            const errTime = new Date(err.ts).toLocaleTimeString();
+        if (state.last_error) {
+            const err = state.last_error;
+            const errTime = err.ts ? new Date(err.ts).toLocaleTimeString() : '--';
             errorCont.innerHTML = `
-                <strong>${err.type}</strong>: ${err.msg}
+                <strong>${err.type || 'Error'}</strong>: ${err.msg || 'Unknown error'}
                 <span class="error-time">Ocurrido a las ${errTime}</span>
             `;
             errorCont.style.color = 'var(--accent-red)';
@@ -148,37 +155,42 @@ function renderHealth(data) {
 }
 
 // ─────────────────────────── KPI Cards ───────────────────────
-function renderKPIs(data) {
-    if (!data) return;
+function renderKPIs(metrics) {
+    if (!metrics) return;
 
-    const balance = data.balance || 0;
-    const equity = data.equity || balance;
-    const unrealizedPnL = equity - balance;
-    const totalPnL = data.total_pnl || 0;
+    // If backend reports no data, show a subtle indicator
+    const noData = metrics.has_data === false;
 
-    // Use animated counting for main metrics
+    const balance = metrics.balance || 0;
+    const equity = metrics.equity || balance;
+    const unrealizedPnL = metrics.unrealized_pnl || (equity - balance);
+    const totalPnL = metrics.total_pnl || 0;
+
+    // Animated counting for main metrics
     animateValue('kpi-balance', parseFloat(document.getElementById('kpi-balance')?.getAttribute('data-value') || '0'), balance, 800);
     animateValue('kpi-equity', parseFloat(document.getElementById('kpi-equity')?.getAttribute('data-value') || '0'), equity, 800);
     animateValue('kpi-total-pnl', parseFloat(document.getElementById('kpi-total-pnl')?.getAttribute('data-value') || '0'), totalPnL, 800);
 
-    // Static updates for smaller metrics
+    // Static updates
     const setStat = (id, value, cssClass = '') => {
         const el = document.getElementById(id);
         if (el) {
             el.textContent = value;
-            el.className = `kpi-value ${cssClass}`;
+            el.className = `kpi-value ${cssClass}${noData ? ' no-data' : ''}`;
         }
     };
 
     setStat('kpi-unrealized', `${unrealizedPnL >= 0 ? '+' : ''}$${unrealizedPnL.toFixed(2)}`,
         unrealizedPnL >= 0 ? 'positive' : 'negative');
-    setStat('kpi-trades', data.total_trades || 0, 'neutral');
-    setStat('kpi-winrate', `${data.win_rate || 0}%`,
-        (data.win_rate || 0) >= 50 ? 'positive' : (data.win_rate > 0 ? 'negative' : 'neutral'));
+    setStat('kpi-trades', metrics.total_trades || 0, 'neutral');
+    setStat('kpi-winrate', `${(metrics.win_rate || 0).toFixed(1)}%`,
+        (metrics.win_rate || 0) >= 50 ? 'positive' : (metrics.win_rate > 0 ? 'negative' : 'neutral'));
 
-    // Update color for equity and PnL
-    document.getElementById('kpi-equity').className = `kpi-value ${unrealizedPnL >= 0 ? 'positive' : 'negative'}`;
-    document.getElementById('kpi-total-pnl').className = `kpi-value ${totalPnL >= 0 ? 'positive' : 'negative'}`;
+    // Color for equity and PnL
+    const eqEl = document.getElementById('kpi-equity');
+    const pnlEl = document.getElementById('kpi-total-pnl');
+    if (eqEl) eqEl.className = `kpi-value ${unrealizedPnL >= 0 ? 'positive' : 'negative'}`;
+    if (pnlEl) pnlEl.className = `kpi-value ${totalPnL >= 0 ? 'positive' : 'negative'}`;
 }
 
 // ─────────────────────────── Equity Chart ────────────────────
@@ -278,20 +290,41 @@ function renderEquityChart(data) {
 // ─────────────────────────── Positions Table ─────────────────
 function renderPositions(positions) {
     const tbody = document.getElementById('positions-body');
-    if (!positions || Object.keys(positions).length === 0) {
+
+    // /api/state returns positions as an array of objects with {symbol, side, ...}
+    if (!positions || (Array.isArray(positions) && positions.length === 0) ||
+        (typeof positions === 'object' && !Array.isArray(positions) && Object.keys(positions).length === 0)) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No open positions</td></tr>';
         return;
     }
-    tbody.innerHTML = Object.entries(positions).map(([symbol, pos]) => {
-        const sideClass = pos.side === 'LONG' ? 'side-long' : 'side-short';
-        return `<tr>
-      <td>${symbol}</td>
-      <td class="${sideClass}">${pos.side}</td>
-      <td>${(pos.average_price || pos.entry_price || 0).toFixed(2)}</td>
-      <td>${(pos.amount || 0).toFixed(4)}</td>
-      <td>${pos.stop_loss ? pos.stop_loss.toFixed(2) : '—'} / ${pos.take_profit ? pos.take_profit.toFixed(2) : '—'}</td>
-    </tr>`;
-    }).join('');
+
+    // Support both array (new /api/state) and dict (legacy /api/account) formats
+    let rows;
+    if (Array.isArray(positions)) {
+        rows = positions.map(pos => {
+            const sideClass = pos.side === 'LONG' ? 'side-long' : 'side-short';
+            return `<tr>
+              <td>${pos.symbol}</td>
+              <td class="${sideClass}">${pos.side}</td>
+              <td>${(pos.average_price || pos.entry_price || 0).toFixed(2)}</td>
+              <td>${(pos.amount || 0).toFixed(4)}</td>
+              <td>${pos.stop_loss ? pos.stop_loss.toFixed(2) : '—'} / ${pos.take_profit ? pos.take_profit.toFixed(2) : '—'}</td>
+            </tr>`;
+        });
+    } else {
+        // Legacy dict format {symbol: {...}}
+        rows = Object.entries(positions).map(([symbol, pos]) => {
+            const sideClass = pos.side === 'LONG' ? 'side-long' : 'side-short';
+            return `<tr>
+              <td>${symbol}</td>
+              <td class="${sideClass}">${pos.side}</td>
+              <td>${(pos.average_price || pos.entry_price || 0).toFixed(2)}</td>
+              <td>${(pos.amount || 0).toFixed(4)}</td>
+              <td>${pos.stop_loss ? pos.stop_loss.toFixed(2) : '—'} / ${pos.take_profit ? pos.take_profit.toFixed(2) : '—'}</td>
+            </tr>`;
+        });
+    }
+    tbody.innerHTML = rows.join('');
 }
 
 // ─────────────────────────── Orders Table ────────────────────
@@ -310,7 +343,7 @@ function renderOrders(orders) {
         return `<tr>
       <td>${o.symbol}</td>
       <td class="${sideClass}">${o.side}</td>
-      <td>${o.price.toFixed(2)}</td>
+      <td>${(o.price || 0).toFixed(2)}</td>
       <td class="badge badge-${o.type === 'grid' ? 'range' : 'trend'}">${o.type || 'limit'}</td>
     </tr>`;
     }).join('');
@@ -324,22 +357,23 @@ function renderTrades(history) {
         return;
     }
     tbody.innerHTML = history.slice().reverse().map(t => {
-        const pnlClass = t.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-        const dt = new Date(t.closed_at);
+        const pnl = t.pnl || t.realized_pnl || 0;
+        const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+        const closed = t.closed_at ? new Date(t.closed_at).toLocaleString() : '--';
         return `<tr>
       <td>${t.symbol}</td>
       <td class="${t.side === 'LONG' ? 'side-long' : 'side-short'}">${t.side}</td>
-      <td class="${pnlClass}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}</td>
-      <td>${dt.toLocaleString()}</td>
+      <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</td>
+      <td>${closed}</td>
     </tr>`;
     }).join('');
 }
 
 // ─────────────────────────── Regime Badges ───────────────────
-function renderRegimeInfo(account) {
+function renderRegimeInfo(state) {
     const container = document.getElementById('regime-info');
-    const regimes = account?.regimes || {};
-    const prices = account?.prices || {};
+    const regimes = state?.regimes || {};
+    const prices = state?.prices || {};
     if (Object.keys(regimes).length === 0) {
         container.innerHTML = '<span class="empty-state">Waiting for data...</span>';
         return;
@@ -417,21 +451,23 @@ function startRefreshBar() {
 // ─────────────────────────── Master refresh ──────────────────
 async function refreshAll() {
     startRefreshBar();
-    const [status, account, equity, logs, alerts] = await Promise.all([
-        fetchJSON('/api/status'),
-        fetchJSON('/api/account'),
+
+    // Fetch from the new guaranteed-schema endpoints
+    const [state, metrics, equity, logs, alerts] = await Promise.all([
+        fetchJSON('/api/state'),
+        fetchJSON('/api/metrics'),
         fetchJSON('/api/equity-history'),
         fetchJSON('/api/logs'),
         fetchJSON('/api/alerts')
     ]);
 
-    renderStatus(status);
-    renderKPIs(account);
+    renderStatus(state);
+    renderKPIs(metrics);
     renderEquityChart(equity);
-    renderPositions(account?.positions);
-    renderOrders(account?.pending_orders);
-    renderTrades(account?.history);
-    renderRegimeInfo(account);
+    renderPositions(state?.open_positions);
+    renderOrders(state?.pending_orders);
+    renderTrades(state?.history || []);
+    renderRegimeInfo(state);
     renderLogs(logs);
     renderAlerts(alerts);
 }

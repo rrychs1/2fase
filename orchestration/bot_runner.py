@@ -21,6 +21,7 @@ from execution.paper_manager import PaperManager
 from common.types import Side, SignalAction
 from logging_monitoring.logger import setup_logger
 from logging_monitoring.telegram_alert_service import TelegramAlertService
+from state.state_manager import write_bot_state
 
 logger = setup_logger()
 
@@ -499,22 +500,23 @@ class BotRunner:
     def update_status(self, status):
         """Update both memory status (Phase 22) and legacy status.json."""
         uptime = str(datetime.now() - self.start_time).split(".")[0]
-        
+
         # Update Phase 22 Object
         self.status["last_change_reason"] = status
         self.status["telegram_available"] = self.telegram.is_healthy()
-        
+
         status_data = {
-            "status": status, 
+            "running": True,
+            "status": status,
             "uptime": uptime,
             "mode": "Paper" if self.config.ANALYSIS_ONLY else ("Testnet" if self.config.USE_TESTNET else "Live"),
             "last_loop": datetime.now().isoformat(),
-            "full_status": self.status
+            "full_status": self.status,
         }
-        with open("status.json", "w") as f: json.dump(status_data, f, indent=4)
+        write_bot_state("status.json", status_data)
 
     def _write_dashboard_state(self, equity, unrealized_pnl, current_prices):
-        """Write unified state for the dashboard — works in both paper and live modes."""
+        """Write unified state for the dashboard — uses state_manager for atomic writes."""
         try:
             if self.config.ANALYSIS_ONLY:
                 balance = self.paper_manager.state.get("balance", 0)
@@ -525,42 +527,34 @@ class BotRunner:
                 balance = equity - unrealized_pnl
                 positions = self.current_positions
                 pending = self.current_orders
-                history = list(self.current_history) # Copy to avoid threading issues
-            
+                history = list(self.current_history)
+
             # Sort history by date descending
             if history:
                 history = sorted(history, key=lambda x: str(x.get('closed_at', '')), reverse=True)
 
             state = {
+                "running": True,
                 "balance": round(balance, 2),
                 "equity": round(equity, 2),
                 "unrealized_pnl": round(unrealized_pnl, 2),
                 "mode": "Paper" if self.config.ANALYSIS_ONLY else ("Testnet" if self.config.USE_TESTNET else "Live"),
                 "positions": positions,
                 "pending_orders": pending,
-                "history": history[:100],  # 100 newest trades
-                "global_stats": self.db.get_stats(), # Phase 4+ Global Stats
+                "history": history[:100],
+                "global_stats": self.db.get_stats(),
                 "regimes": self.current_regimes,
                 "prices": {s: round(p, 2) for s, p in current_prices.items()},
                 "iteration": self.iteration_count,
-                "timestamp": datetime.now().isoformat(),
                 "uptime": str(datetime.now() - self.start_time).split(".")[0],
                 "metrics": self.metrics,
-                "status": self.status, # Phase 22: Expose full status
+                "status": self.status,
                 "exchange_status": "Connected" if self.status["exchange_connected"] else "Failed",
                 "last_error": self.last_error,
-                "telegram_healthy": self.telegram.is_healthy()
+                "telegram_healthy": self.telegram.is_healthy(),
             }
-            state_path = os.getenv("STATE_FILE", "dashboard_state.json")
-            abs_state_path = os.path.abspath(state_path)
-            
-            # Ensure directory exists
-            state_dir = os.path.dirname(abs_state_path)
-            if state_dir and not os.path.exists(state_dir):
-                os.makedirs(state_dir)
-                
-            with open(abs_state_path, "w") as f:
-                json.dump(state, f, indent=2, default=str)
+            state_path = os.getenv("STATE_FILE", "data/dashboard_state.json")
+            write_bot_state(state_path, state)
         except Exception as e:
             logger.warning(f"Failed to write dashboard state: {e}")
 

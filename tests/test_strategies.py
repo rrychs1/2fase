@@ -12,8 +12,13 @@ from indicators.technical_indicators import add_standard_indicators
 
 
 def _run(coro):
-    """Helper to run async coroutines in tests."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Helper to run async coroutines in tests. Used only for synchronous contexts if needed."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 class TestNeutralGridStrategy:
@@ -38,7 +43,8 @@ class TestNeutralGridStrategy:
             if level.side == "sell":
                 assert level.price >= volume_profile.poc
 
-    def test_on_market_state_emits_grid_signals(self, config, volume_profile):
+    @pytest.mark.asyncio
+    async def test_on_market_state_emits_grid_signals(self, config, volume_profile):
         strategy = NeutralGridStrategy(config)
         market_state = {
             "price": volume_profile.poc,
@@ -46,7 +52,7 @@ class TestNeutralGridStrategy:
             "position": None,
             "equity": 10000.0,
         }
-        signals = _run(strategy.on_market_state("BTC/USDT", market_state))
+        signals = await strategy.on_market_state("BTC/USDT", market_state)
         # First call should build grid
         assert len(signals) > 0
         assert all(s.action == SignalAction.GRID_PLACE for s in signals)
@@ -115,7 +121,8 @@ class TestTrendDcaStrategy:
         assert sl > 60000.0  # SL above entry for short
         assert tp < 60000.0  # TP below entry for short
 
-    def test_exit_on_tp_with_none_sl(self, config):
+    @pytest.mark.asyncio
+    async def test_exit_on_tp_with_none_sl(self, config):
         """Positions with None SL/TP should not crash."""
         strategy = TrendDcaStrategy(config)
         market_state = {
@@ -130,12 +137,13 @@ class TestTrendDcaStrategy:
             "equity": 10000.0,
         }
         # Should not raise TypeError
-        signals = _run(strategy.on_new_candle("BTC/USDT", market_state))
+        signals = await strategy.on_new_candle("BTC/USDT", market_state)
         assert isinstance(signals, list)
 
 
 class TestStrategyRouter:
-    def test_routes_to_grid_in_range(self, config, volume_profile):
+    @pytest.mark.asyncio
+    async def test_routes_to_grid_in_range(self, config, volume_profile):
         grid = NeutralGridStrategy(config)
         trend = TrendDcaStrategy(config)
         router = StrategyRouter(grid, trend)
@@ -146,11 +154,12 @@ class TestStrategyRouter:
             "position": None,
             "equity": 10000.0,
         }
-        signals = _run(router.route_signals("BTC/USDT", "range", market_state))
+        signals = await router.route_signals("BTC/USDT", "range", market_state)
         # Should get grid signals
         assert any(s.action == SignalAction.GRID_PLACE for s in signals)
 
-    def test_routes_to_trend_in_trend(self, config):
+    @pytest.mark.asyncio
+    async def test_routes_to_trend_in_trend(self, config):
         np.random.seed(42)
         grid = NeutralGridStrategy(config)
         trend = TrendDcaStrategy(config)
@@ -173,5 +182,5 @@ class TestStrategyRouter:
             "equity": 10000.0,
         }
         # Should not produce grid signals in trend mode
-        signals = _run(router.route_signals("BTC/USDT", "trend", market_state))
+        signals = await router.route_signals("BTC/USDT", "trend", market_state)
         assert not any(s.action == SignalAction.GRID_PLACE for s in signals)

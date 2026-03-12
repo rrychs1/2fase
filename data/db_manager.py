@@ -121,3 +121,97 @@ class DbManager:
         except Exception as e:
             logger.error(f"Error calculating stats: {e}")
             return {"total_trades": 0, "total_pnl": 0.0, "win_rate": 0.0, "wins": 0}
+
+    # ── Robust methods for dashboard API ─────────────────────
+
+    def get_metrics_snapshot(self) -> dict:
+        """
+        Return a guaranteed-schema metrics dict for /api/metrics.
+        Never raises — returns defaults with has_data=False on any failure.
+        """
+        default = {
+            "has_data": False,
+            "balance": 0.0,
+            "equity": 0.0,
+            "unrealized_pnl": 0.0,
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "win_rate": 0.0,
+        }
+        try:
+            if not os.path.exists(self.db_path):
+                return default
+
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                cursor = conn.cursor()
+
+                # ─ Trade stats ───────────────────────────────
+                cursor.execute('SELECT COUNT(*) FROM trades')
+                total_trades = cursor.fetchone()[0] or 0
+
+                cursor.execute('SELECT COALESCE(SUM(realized_pnl), 0.0) FROM trades')
+                total_pnl = float(cursor.fetchone()[0])
+
+                cursor.execute('SELECT COUNT(*) FROM trades WHERE realized_pnl > 0')
+                wins = cursor.fetchone()[0] or 0
+                win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0.0
+
+                # ─ Balance/Equity (from account_snapshots if it exists) ──
+                balance, equity = 0.0, 0.0
+                try:
+                    row = cursor.execute(
+                        "SELECT balance, equity FROM account_snapshots ORDER BY ts DESC LIMIT 1"
+                    ).fetchone()
+                    if row:
+                        balance = float(row[0] or 0)
+                        equity = float(row[1] or 0)
+                except sqlite3.OperationalError:
+                    # Table doesn't exist — that's fine
+                    pass
+
+                has_data = total_trades > 0 or balance > 0
+
+                return {
+                    "has_data": has_data,
+                    "balance": round(balance, 2),
+                    "equity": round(equity, 2),
+                    "unrealized_pnl": round(equity - balance, 2),
+                    "total_pnl": round(total_pnl, 2),
+                    "total_trades": total_trades,
+                    "win_rate": win_rate,
+                }
+        except Exception as e:
+            logger.error(f"get_metrics_snapshot failed: {e}")
+            return default
+
+    def get_recent_trades_list(self, limit: int = 50) -> list:
+        """
+        Return recent trades as a list of dicts with normalized field names.
+        Never raises — returns [] on failure.
+        """
+        try:
+            with sqlite3.connect(self.db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT trade_id, symbol, side, price, amount, '
+                    'realized_pnl, closed_at FROM trades '
+                    'ORDER BY closed_at DESC LIMIT ?',
+                    (limit,)
+                )
+                result = []
+                for row in cursor.fetchall():
+                    result.append({
+                        "id": row["trade_id"],
+                        "symbol": row["symbol"],
+                        "side": row["side"],
+                        "price": float(row["price"] or 0),
+                        "amount": float(row["amount"] or 0),
+                        "pnl": float(row["realized_pnl"] or 0),
+                        "closed_at": row["closed_at"] or "",
+                    })
+                return result
+        except Exception as e:
+            logger.error(f"get_recent_trades_list failed: {e}")
+            return []
+
