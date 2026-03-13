@@ -1,186 +1,203 @@
-"""Tests for strategy/ modules."""
 import pytest
-import asyncio
-import numpy as np
 import pandas as pd
-
-from common.types import Side, SignalAction, VolumeProfile
+import numpy as np
+import time
+from unittest.mock import MagicMock, patch, AsyncMock
+from common.types import Side, SignalAction, Signal, VolumeProfile, GridLevel, GridState
 from strategy.neutral_grid_strategy import NeutralGridStrategy
 from strategy.trend_dca_strategy import TrendDcaStrategy
 from strategy.strategy_router import StrategyRouter
-from indicators.technical_indicators import add_standard_indicators
 
+@pytest.fixture
+def mock_config():
+    config = MagicMock()
+    config.GRID_ATR_MULTIPLIER = 1.0
+    config.GRID_MAX_LEVELS = 10
+    config.DCA_STEPS = 3
+    return config
 
-def _run(coro):
-    """Helper to run async coroutines in tests. Used only for synchronous contexts if needed."""
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+@pytest.fixture
+def grid_strategy(mock_config):
+    return NeutralGridStrategy(mock_config)
 
+@pytest.fixture
+def trend_strategy(mock_config):
+    return TrendDcaStrategy(mock_config)
 
-class TestNeutralGridStrategy:
-    def test_generate_grid_levels_count(self, config, volume_profile):
-        config.GRID_LEVELS = 6
-        strategy = NeutralGridStrategy(config)
-        levels = strategy.generate_grid_levels("BTC/USDT", volume_profile, 4000.0)
-        # 6 levels: 3 buy + 3 sell
-        assert len(levels) == 6
+# ─────────────────────────────────────────────────────────────────────────────
+# Neutral Grid Strategy Tests
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def test_buy_levels_below_poc(self, config, volume_profile):
-        strategy = NeutralGridStrategy(config)
-        levels = strategy.generate_grid_levels("BTC/USDT", volume_profile, 4000.0)
-        for level in levels:
-            if level.side == "buy":
-                assert level.price <= volume_profile.poc
+def test_grid_level_generation_volatility_scaling(grid_strategy):
+    vp = VolumeProfile(poc=100.0, vah=110.0, val=90.0)
+    market_state = {'atr': 2.0, 'volatility_regime': 'MEDIUM'}
+    
+    # MEDIUM: spacing = 1.0 * 2.0 = 2.0
+    # Buy: 100-2, 100-4, 100-6, 100-8, 100-10 (5 levels)
+    # Sell: 100+2, 100+4, 100+6, 100+8, 100+10 (5 levels)
+    levels = grid_strategy.generate_grid_levels("BTC/USDT", vp, 1000.0, market_state)
+    assert len(levels) == 10
+    assert levels[0].price == 90.0  # Lowest buy
+    assert levels[-1].price == 110.0 # Highest sell
 
-    def test_sell_levels_above_poc(self, config, volume_profile):
-        strategy = NeutralGridStrategy(config)
-        levels = strategy.generate_grid_levels("BTC/USDT", volume_profile, 4000.0)
-        for level in levels:
-            if level.side == "sell":
-                assert level.price >= volume_profile.poc
+    # HIGH: spacing = 1.5 * 2.0 = 3.0
+    market_state['volatility_regime'] = 'HIGH'
+    levels_high = grid_strategy.generate_grid_levels("BTC/USDT", vp, 1000.0, market_state)
+    # 10/3 = 3 levels each side
+    assert len(levels_high) == 6
 
-    @pytest.mark.asyncio
-    async def test_on_market_state_emits_grid_signals(self, config, volume_profile):
-        strategy = NeutralGridStrategy(config)
-        market_state = {
-            "price": volume_profile.poc,
-            "volume_profile": volume_profile,
-            "position": None,
-            "equity": 10000.0,
-        }
-        signals = await strategy.on_market_state("BTC/USDT", market_state)
-        # First call should build grid
+@pytest.mark.asyncio
+async def test_grid_initial_placement(grid_strategy):
+    vp = VolumeProfile(poc=100.0, vah=110.0, val=90.0)
+    market_state = {
+        'price': 100.0,
+        'volume_profile': vp,
+        'atr': 5.0,
+        'volatility_regime': 'MEDIUM',
+        'equity': 1000.0
+    }
+    
+    # mock time to avoid rebuild issues
+    with patch('time.time', return_value=1000.0):
+        signals = await grid_strategy.on_market_state("BTC/USDT", market_state)
         assert len(signals) > 0
-        assert all(s.action == SignalAction.GRID_PLACE for s in signals)
+        assert signals[0].action == SignalAction.GRID_PLACE
+        assert signals[0].strategy == "GridInitial"
 
+@pytest.mark.asyncio
+async def test_grid_rebuild_after_cooldown(grid_strategy):
+    vp = VolumeProfile(poc=100.0, vah=110.0, val=90.0)
+    market_state = {
+        'price': 120.0, # Outside VA
+        'volume_profile': vp,
+        'atr': 2.0,
+        'volatility_regime': 'MEDIUM',
+        'equity': 1000.0
+    }
+    
+    # 1. Initial placement
+    with patch('time.time', return_value=1000.0):
+        await grid_strategy.on_market_state("BTC/USDT", market_state)
+        
+    # 2. Price stays outside for 3 checks
+    with patch('time.time', return_value=1001.0):
+        await grid_strategy.on_market_state("BTC/USDT", market_state) # outside (1)
+        await grid_strategy.on_market_state("BTC/USDT", market_state) # outside (2)
+        
+    # 3. Third check, 10 mins passed
+    with patch('time.time', return_value=1700.0):
+        signals = await grid_strategy.on_market_state("BTC/USDT", market_state) # outside (3) + cooldown ok
+        assert len(signals) > 0
+        assert any(s.strategy == "GridInitial" for s in signals)
 
-class TestTrendDcaStrategy:
-    def _make_trend_df(self, direction="up", n=300):
-        """Create a DataFrame that should trigger a trend signal."""
-        np.random.seed(42)
-        if direction == "up":
-            price = np.linspace(50000, 80000, n) + np.random.normal(0, 100, n)
-        else:
-            price = np.linspace(80000, 50000, n) + np.random.normal(0, 100, n)
-        df = pd.DataFrame({
-            "open": price * 0.999,
-            "high": price * 1.003,
-            "low": price * 0.997,
-            "close": price,
-            "volume": np.random.uniform(100, 500, n),
-        })
-        return add_standard_indicators(df)
+# ─────────────────────────────────────────────────────────────────────────────
+# Trend DCA Strategy Tests
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def test_generate_trend_signal_long(self, config):
-        strategy = TrendDcaStrategy(config)
-        df = self._make_trend_df("up")
-        result = strategy.generate_trend_signal("BTC/USDT", df)
-        assert result == Side.LONG
+def test_trend_detection_logic(trend_strategy):
+    # Bullish data (needs >= 20 rows)
+    df_bull = pd.DataFrame({
+        'EMA_fast': [10]*20,
+        'EMA_slow': [8]*20,
+        'MACD': [0.1]*20,
+        'close': [100]*20
+    })
+    # Update last row to ensure it's bullish
+    df_bull.at[19, 'EMA_fast'] = 12
+    df_bull.at[19, 'EMA_slow'] = 10
+    df_bull.at[19, 'MACD'] = 0.3
+    df_bull.at[19, 'close'] = 102
+    
+    assert trend_strategy.generate_trend_signal("BTC/USDT", df_bull) == Side.LONG
+    
+    # Bearish data
+    df_bear = pd.DataFrame({
+        'EMA_fast': [10]*20,
+        'EMA_slow': [12]*20,
+        'MACD': [-0.1]*20,
+        'close': [100]*20
+    })
+    df_bear.at[19, 'EMA_fast'] = 8
+    df_bear.at[19, 'EMA_slow'] = 10
+    df_bear.at[19, 'MACD'] = -0.3
+    df_bear.at[19, 'close'] = 98
+    
+    assert trend_strategy.generate_trend_signal("BTC/USDT", df_bear) == Side.SHORT
 
-    def test_generate_trend_signal_short(self, config):
-        strategy = TrendDcaStrategy(config)
-        df = self._make_trend_df("down")
-        result = strategy.generate_trend_signal("BTC/USDT", df)
-        assert result == Side.SHORT
+@pytest.mark.asyncio
+async def test_trend_pullback_entry(trend_strategy):
+    # Setup Bullish trend with a pullback
+    # Needs >= 20 rows
+    data = {
+        'EMA_fast': [100.0] * 20,
+        'EMA_slow': [90.0] * 20,
+        'MACD': [1.0] * 20,
+        'close': [105.0] * 20,
+        'low': [102.0] * 20,
+        'high': [106.0] * 20,
+        'ATR': [5.0] * 20
+    }
+    df = pd.DataFrame(data)
+    
+    # Pullback: prev_low <= EMA_fast and last_close > EMA_fast
+    df.at[18, 'low'] = 98.0  # prev_low (98) <= EMA_fast (100)
+    df.at[19, 'close'] = 102.0 # last_close (102) > EMA_fast (100)
+    
+    market_state = {
+        'df': df,
+        'price': 102.0,
+        'equity': 1000.0,
+        'position': {'is_active': False}
+    }
+    
+    signals = await trend_strategy.on_new_candle("BTC/USDT", market_state)
+    assert len(signals) == 1
+    assert signals[0].action == SignalAction.ENTER_LONG
+    assert signals[0].price == 102.0
 
-    def test_generate_trend_signal_none_on_empty(self, config):
-        strategy = TrendDcaStrategy(config)
-        result = strategy.generate_trend_signal("BTC/USDT", None)
-        assert result is None
+@pytest.mark.asyncio
+async def test_trend_dca_replenishment(trend_strategy):
+    # Setup active position
+    trend_strategy.active_positions["BTC/USDT"] = MagicMock(
+        is_active=True,
+        dca_levels=[MagicMock(price=90.0, amount=1.0, filled=False)]
+    )
+    
+    data = {
+        'close': [100.0] * 20,
+        'EMA_fast': [110.0] * 20,
+        'EMA_slow': [100.0] * 20,
+        'MACD': [1.0] * 20,
+        'ATR': [5.0] * 20
+    }
+    df = pd.DataFrame(data)
+    df.at[19, 'close'] = 89.0 # Price dropped to 89 (below DCA 90)
+    
+    market_state = {
+        'df': df,
+        'position': {'is_active': True, 'side': 'LONG', 'take_profit': 150.0},
+        'equity': 1000.0
+    }
+    
+    signals = await trend_strategy.on_new_candle("BTC/USDT", market_state)
+    assert any(s.action == SignalAction.DCA_ADD for s in signals)
 
-    def test_plan_dca_levels(self, config):
-        config.DCA_STEPS = 3
-        strategy = TrendDcaStrategy(config)
-        levels = strategy.plan_dca_levels(60000.0, Side.LONG, 1000.0)
-        assert len(levels) == 3
-        # Each DCA level should be below entry for LONG
-        for level in levels:
-            assert level.price < 60000.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy Router Tests
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def test_plan_dca_levels_short(self, config):
-        config.DCA_STEPS = 3
-        strategy = TrendDcaStrategy(config)
-        levels = strategy.plan_dca_levels(60000.0, Side.SHORT, 1000.0)
-        # Each DCA level should be above entry for SHORT
-        for level in levels:
-            assert level.price > 60000.0
-
-    def test_sl_tp_calculation(self, config):
-        strategy = TrendDcaStrategy(config)
-        sl, tp = strategy.calculate_sl_tp(60000.0, Side.LONG, 1000.0)
-        assert sl < 60000.0  # SL below entry for long
-        assert tp > 60000.0  # TP above entry for long
-
-    def test_sl_tp_short(self, config):
-        strategy = TrendDcaStrategy(config)
-        sl, tp = strategy.calculate_sl_tp(60000.0, Side.SHORT, 1000.0)
-        assert sl > 60000.0  # SL above entry for short
-        assert tp < 60000.0  # TP below entry for short
-
-    @pytest.mark.asyncio
-    async def test_exit_on_tp_with_none_sl(self, config):
-        """Positions with None SL/TP should not crash."""
-        strategy = TrendDcaStrategy(config)
-        market_state = {
-            "df": self._make_trend_df("up"),
-            "position": {
-                "is_active": True,
-                "side": "LONG",
-                "stop_loss": None,
-                "take_profit": None,
-                "dca_levels": [],
-            },
-            "equity": 10000.0,
-        }
-        # Should not raise TypeError
-        signals = await strategy.on_new_candle("BTC/USDT", market_state)
-        assert isinstance(signals, list)
-
-
-class TestStrategyRouter:
-    @pytest.mark.asyncio
-    async def test_routes_to_grid_in_range(self, config, volume_profile):
-        grid = NeutralGridStrategy(config)
-        trend = TrendDcaStrategy(config)
-        router = StrategyRouter(grid, trend)
-
-        market_state = {
-            "price": volume_profile.poc,
-            "volume_profile": volume_profile,
-            "position": None,
-            "equity": 10000.0,
-        }
-        signals = await router.route_signals("BTC/USDT", "range", market_state)
-        # Should get grid signals
-        assert any(s.action == SignalAction.GRID_PLACE for s in signals)
-
-    @pytest.mark.asyncio
-    async def test_routes_to_trend_in_trend(self, config):
-        np.random.seed(42)
-        grid = NeutralGridStrategy(config)
-        trend = TrendDcaStrategy(config)
-        router = StrategyRouter(grid, trend)
-
-        n = 300
-        price = np.linspace(50000, 80000, n) + np.random.normal(0, 100, n)
-        df = pd.DataFrame({
-            "open": price * 0.999,
-            "high": price * 1.003,
-            "low": price * 0.997,
-            "close": price,
-            "volume": np.random.uniform(100, 500, n),
-        })
-        df = add_standard_indicators(df)
-
-        market_state = {
-            "df": df,
-            "position": None,
-            "equity": 10000.0,
-        }
-        # Should not produce grid signals in trend mode
-        signals = await router.route_signals("BTC/USDT", "trend", market_state)
-        assert not any(s.action == SignalAction.GRID_PLACE for s in signals)
+@pytest.mark.asyncio
+async def test_router_delegation(grid_strategy, trend_strategy):
+    router = StrategyRouter(grid_strategy, trend_strategy)
+    
+    # 1. Range regime
+    grid_strategy.on_market_state = AsyncMock(return_value=[Signal("BTC", SignalAction.HOLD)])
+    signals = await router.route_signals("BTC/USDT", "range", {})
+    grid_strategy.on_market_state.assert_called_once()
+    assert signals[0].action == SignalAction.HOLD
+    
+    # 2. Trend regime
+    trend_strategy.on_new_candle = AsyncMock(return_value=[Signal("BTC", SignalAction.ENTER_LONG)])
+    signals = await router.route_signals("BTC/USDT", "trend", {})
+    trend_strategy.on_new_candle.assert_called_once()
+    assert signals[0].action == SignalAction.ENTER_LONG

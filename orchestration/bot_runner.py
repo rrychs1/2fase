@@ -1,4 +1,5 @@
 import asyncio
+import pandas as pd
 import time
 import json
 import os
@@ -16,12 +17,21 @@ from strategy.neutral_grid_strategy import NeutralGridStrategy
 from strategy.trend_dca_strategy import TrendDcaStrategy
 from strategy.strategy_router import StrategyRouter
 from risk.risk_manager import RiskManager
-from execution.execution_engine import ExecutionEngine
-from execution.paper_manager import PaperManager
+from execution.execution_router import ExecutionRouter
+from regime.volatility_detector import VolatilityRegimeDetector
 from common.types import Side, SignalAction
 from logging_monitoring.logger import setup_logger
 from logging_monitoring.telegram_alert_service import TelegramAlertService
 from state.state_manager import write_bot_state
+import traceback # Added for detailed error logging
+from logging_monitoring.metrics_server import (
+    start_metrics_exporter, 
+    bot_unrealized_pnl, 
+    bot_daily_drawdown_pct, 
+    bot_current_exposure, 
+    bot_system_health, 
+    bot_ws_connected
+)
 
 logger = setup_logger()
 
@@ -40,11 +50,14 @@ class BotRunner:
         
         self.neutral_grid = NeutralGridStrategy(self.config)
         self.trend_dca = TrendDcaStrategy(self.config)
-        self.router = StrategyRouter(self.neutral_grid, self.trend_dca)
+        self.strategy_router = StrategyRouter(self.neutral_grid, self.trend_dca)
+        self.volatility_detector = VolatilityRegimeDetector()
+        
+        from data.websocket_manager import WebsocketManager
+        self.ws_manager = WebsocketManager(self.config)
         
         self.risk_manager = RiskManager(self.config)
-        self.execution = ExecutionEngine(self.exchange, self.config)
-        self.paper_manager = PaperManager()
+        self.execution_router = ExecutionRouter(self.exchange, self.config)
         self.telegram = TelegramAlertService()
         self.last_grid_update = {}
         self.iteration_count = 0
@@ -114,47 +127,121 @@ class BotRunner:
                 await self.exchange.set_leverage(symbol, self.config.LEVERAGE)
 
         try:
-            while True:
-                start_iter = time.time()
-                try:
-                    await self.exchange._apply_backoff() # Phase 5
-                    await self.iterate()
-                except Exception as e:
-                    etype = type(e).__name__
-                    short_msg = str(e)[:100]
-                    self.last_error = {"type": etype, "msg": short_msg, "ts": datetime.now().isoformat()}
-                    
-                    # Lead Developer: Specialized TypeError Diagnostic (Task 69)
-                    if isinstance(e, TypeError):
-                        logger.critical(f"TYPE ERROR DETECTED in bot loop: {e}")
-                        # Log types of suspicious variables
-                        logger.debug(f"State Types: iteration={type(self.iteration_count)}, exchange={type(self.exchange)}, telegram={type(self.telegram)}")
-                    
-                    logger.error(f"Error in iteration loop: {e}", exc_info=True)
-                    self.circuit_breaker.report_error()
-                    
-                    # Senior Hardening: Rich Error Context
-                    ctx = f"Modo: `{mode_str}`\nIteración: `{self.iteration_count}`\n"
-                    await self.telegram.critical(
-                        f"❌ **Error Crítico de Bucle**\n{ctx}Tipo: `{etype}`\nMensaje: `{short_msg}`\n_Detalle técnico en servidor._",
-                        dedup_key=f"loop_error_{etype}"
-                    )
+            # 0. Startup State Synchronization
+            if self.config.EXECUTION_MODE == 'LIVE':
+                logger.info("[Startup Sync] Reconciling memory with Exchange open orders...")
+                for s_symbol in self.config.SYMBOLS:
+                    try:
+                        open_orders = await self.exchange.fetch_open_orders(s_symbol)
+                        self.neutral_grid.reconcile_with_exchange(s_symbol, open_orders)
+                        self.trend_dca.reconcile_with_exchange(s_symbol, open_orders)
+                    except Exception as e:
+                        logger.warning(f"[Startup Sync] Failed to sync orders for {s_symbol}: {e}")
+
+            # 1. Seed Initial Data via REST (Polling) for all symbols
+            logger.info("Seeding initial data before WS/Polling loop...")
+            for symbol in self.config.SYMBOLS:
+                await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
+                await self.data_engine.fetch_ohlcv(symbol, self.config.TF_TREND, limit=self.config.CANDLES_ANALYSIS_LIMIT)
+
+            if getattr(self.config, 'USE_WEBSOCKETS', True):
+                # WEBSOCKET MODE
+                logger.info("Initializing Websocket Event Loop...")
+                for symbol in self.config.SYMBOLS:
+                    self.ws_manager.add_subscription(symbol, [self.config.TF_GRID, self.config.TF_TREND])
                 
-                # Periodic Alert Flush (e.g. every 5 mins for better responsiveness)
-                if time.time() - self.last_alert_flush > 300:
-                    await self.telegram.flush_alerts()
-                    self.last_alert_flush = time.time()
+                asyncio.create_task(self.ws_manager.connect())
+                asyncio.create_task(self._heartbeat_loop())
                 
-                elapsed = time.time() - start_iter
-                logger.info(f"Cycle processed | symbols={len(self.config.SYMBOLS)} duration={elapsed*1000:.0f}ms")
-                
-                sleep_time = max(1, self.config.POLLING_INTERVAL - elapsed)
-                await asyncio.sleep(sleep_time)
+                # Consume events from queue
+                while True:
+                    event = await self.ws_manager.event_queue.get()
+                    start_iter = time.time()
+                    try:
+                        # 1. Update internal DataFrame fast addition
+                        await self.data_engine.update_ohlcv(event)
+                        logger.debug(f"[WS] Processed closed candle: {event.symbol} {event.timeframe}")
+                        
+                        # 2. Trigger Strategy Evaluation specifically for this symbol
+                        await self.exchange._apply_backoff() 
+                        await self.iterate(target_symbol=event.symbol)
+                        
+                    except Exception as e:
+                        self._handle_loop_error(e, f"WS_SIM ({event.symbol})")
+                    finally:
+                        self.ws_manager.event_queue.task_done()
+                        self._flush_alerts_and_log(start_iter)
+            else:
+                # LEGACY POLLING MODE
+                while True:
+                    start_iter = time.time()
+                    try:
+                        await self.exchange._apply_backoff()
+                        await self.iterate()
+                    except Exception as e:
+                        self._handle_loop_error(e, mode_str)
+                    
+                    self._flush_alerts_and_log(start_iter)
+                    elapsed = time.time() - start_iter
+                    sleep_time = max(1, self.config.POLLING_INTERVAL - elapsed)
+                    await asyncio.sleep(sleep_time)
+
         finally:
+            # Clean boot flag on graceful exit
+            if os.path.exists(self.boot_flag_file):
+                try: os.remove(self.boot_flag_file)
+                except: pass
+                
+            await self.ws_manager.stop()
             await self.telegram.info("🛑 **Bot Detenido**", force=True)
             await self.exchange.close()
 
-    async def iterate(self):
+    async def _heartbeat_loop(self):
+        """Asynchronous task reporting detailed subsystem health every minute."""
+        interval = getattr(self.config, 'HEARTBEAT_INTERVAL', 60)
+        while True:
+            await asyncio.sleep(interval)
+            
+            # Formulate subsystem status
+            ws_state = "Connected" if getattr(self.ws_manager, 'ws', None) and not self.ws_manager.ws.closed else "Disconnected"
+            last_api = getattr(self.exchange, 'last_api_success', 0)
+            api_lag = time.time() - last_api if last_api > 0 else -1
+            
+            # Prometheus Updates
+            bot_ws_connected.set(1 if ws_state == "Connected" else 0)
+            bot_system_health.set(0 if self.risk_manager.is_kill_switch_active or self.risk_manager.is_safe_mode else 1)
+            
+            log_msg = (
+                f"[HEARTBEAT] Equity: {self.risk_manager.reference_equity:.2f} | "
+                f"WS: {ws_state} | "
+                f"API Last Success: {api_lag:.1f}s ago | "
+                f"Iter: {self.iteration_count}"
+            )
+            logger.info(log_msg)
+
+    def _handle_loop_error(self, e, mode_str):
+        etype = type(e).__name__
+        short_msg = str(e)[:100]
+        self.last_error = {"type": etype, "msg": short_msg, "ts": datetime.now().isoformat()}
+        if isinstance(e, TypeError):
+            logger.critical(f"TYPE ERROR DETECTED in bot loop: {e}")
+            logger.debug(f"State Types: iteration={type(self.iteration_count)}, exchange={type(self.exchange)}, telegram={type(self.telegram)}")
+        logger.error(f"Error in iteration loop: {e}", exc_info=True)
+        self.circuit_breaker.report_error()
+        ctx = f"Modo: `{mode_str}`\nIteración: `{self.iteration_count}`\n"
+        asyncio.create_task(self.telegram.critical(
+            f"❌ **Error Crítico de Bucle**\n{ctx}Tipo: `{etype}`\nMensaje: `{short_msg}`\n_Detalle técnico en servidor._",
+            dedup_key=f"loop_error_{etype}"
+        ))
+
+    def _flush_alerts_and_log(self, start_iter):
+        if time.time() - self.last_alert_flush > 300:
+            asyncio.create_task(self.telegram.flush_alerts())
+            self.last_alert_flush = time.time()
+        elapsed = time.time() - start_iter
+        logger.info(f"Cycle processed | symbols={len(self.config.SYMBOLS)} duration={elapsed*1000:.0f}ms")
+
+    async def iterate(self, target_symbol=None):
         self.iteration_count += 1
         
         # Phase 5: Check Circuit Breaker & Alerts Health
@@ -175,26 +262,23 @@ class BotRunner:
         self.current_regimes = {}
         self.current_positions = {}
         self.current_orders = []
-        # 0. Fetch latest prices for all symbols first to accurately estimate equity/risk
-        for symbol in self.config.SYMBOLS:
-            df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
+        
+        # Subset of symbols if triggered by specific websocket event
+        symbols_to_process = [target_symbol] if target_symbol else self.config.SYMBOLS
+
+        # 0. Fetch latest prices to accurately estimate equity/risk
+        for symbol in symbols_to_process:
+            # First try the data engine cache (updated directly by WS or polling earlier)
+            df_4h = self.data_engine.data.get((symbol, self.config.TF_GRID))
+            if df_4h is None or len(df_4h) < 20:
+                # Fallback to polling if cache missing
+                df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
             if df_4h is not None and len(df_4h) > 0:
                 current_prices[symbol] = df_4h.iloc[-1]['close']
 
         # 1. Sync Account State with accurate prices
         try:
-            if self.config.ANALYSIS_ONLY:
-                equity = self.paper_manager.get_equity(current_prices)
-                balance_val = self.paper_manager.state.get("balance", 0.0)
-                if not isinstance(equity, (int, float)) or not isinstance(balance_val, (int, float)):
-                    logger.error(f"[Sync] Invalid Paper types: equity={type(equity)}, balance={type(balance_val)}")
-                    unrealized_pnl = 0.0
-                else:
-                    unrealized_pnl = equity - balance_val
-            else:
-                balance = await self.exchange.fetch_balance()
-                equity = float(balance.get('total', {}).get('USDT', 0.0))
-                unrealized_pnl = await self.execution.get_account_pnl()
+            equity, unrealized_pnl = await self.execution_router.get_equity_and_pnl(current_prices)
             
             # Robustness: Coerce to float
             equity = float(equity) if isinstance(equity, (int, float)) else 0.0
@@ -219,45 +303,78 @@ class BotRunner:
 
             # 3. Global Risk Check (Kill Switch)
             if self.risk_manager.check_daily_drawdown(unrealized_pnl, equity):
-                msg = "KILL SWITCH: Closing all positions!"
+                msg = "💀 KILL SWITCH ACTIVATED: Cancelling orders and liquidating positions!"
                 logger.critical(msg)
+                bot_system_health.set(0) # Update metrics before returning
                 await self.telegram.critical(msg, dedup_key="kill_switch_active")
                 
-                if self.config.ANALYSIS_ONLY:
-                    self.paper_manager.state["positions"] = {}
-                    self.paper_manager.state["pending_orders"] = []
-                else:
-                    await self.execution.close_all_positions()
+                # Panic Liquidation: Cancel all limits/stops first
+                for s_sym in self.config.SYMBOLS:
+                    await self.exchange.cancel_all_orders(s_sym)
+                
+                # Panic Liquidation: Close open positions via ExecutionRouter
+                await self.execution_router.close_all_positions(current_prices)
                 
                 # Write state before returning to show KILL SWITCH status
                 self._write_dashboard_state(equity, unrealized_pnl, current_prices)
                 return
+            
+            # Update Prometheus
+            bot_unrealized_pnl.set(unrealized_pnl)
+            
+            # Drawdown pct
+            if self.risk_manager.day_start_equity > 0:
+                dd_pct = unrealized_pnl / self.risk_manager.day_start_equity
+                bot_daily_drawdown_pct.set(dd_pct)
+                
+            # Current Exposure calculation
+            total_exposure = 0.0
+            positions_data = self.execution_router.get_state_metrics().get('positions', {})
+            for sym, pos in positions_data.items():
+                if isinstance(pos, dict):
+                    qty = float(pos.get('amount', 0))
+                    price = float(pos.get('average_price', current_prices.get(sym, 0)))
+                    total_exposure += (qty * price)
+            bot_current_exposure.set(total_exposure)
+
+            self._write_dashboard_state(equity, unrealized_pnl, current_prices, target_symbol)
         except Exception as e:
             logger.warning(f"Failed to sync account state: {e}")
             equity = 10000.0 if self.config.ANALYSIS_ONLY else 0.0
             unrealized_pnl = 0.0
 
-        for symbol in self.config.SYMBOLS:
+        for symbol in symbols_to_process:
             # 3. Update Data & Indicators
-            df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
-            df_trend = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_TREND, limit=self.config.CANDLES_ANALYSIS_LIMIT)
+            # Try from internal memory cache first (populated by WS or initial seed)
+            df_4h = self.data_engine.data.get((symbol, self.config.TF_GRID))
+            df_trend = self.data_engine.data.get((symbol, self.config.TF_TREND))
+            
+            if df_4h is None or len(df_4h) < 20: 
+                df_4h = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_GRID, limit=self.config.CANDLES_ANALYSIS_LIMIT)
+            if df_trend is None or len(df_trend) < 20:
+                df_trend = await self.data_engine.fetch_ohlcv(symbol, self.config.TF_TREND, limit=self.config.CANDLES_ANALYSIS_LIMIT)
             
             if df_4h is None or df_trend is None or len(df_4h) < 20: continue
             
             price = current_prices.get(symbol, df_4h.iloc[-1]['close'])
             
-            # Update Paper Positions (Check SL/TP and Pending Orders)
-            if self.config.ANALYSIS_ONLY:
-                self.paper_manager.update_positions({symbol: price})
+            # Update Virtual Positions (Check SL/TP and Pending Orders)
+            self.execution_router.update_positions({symbol: price})
 
+            # 3. Indicator Calculation
             df_4h = add_standard_indicators(df_4h)
             df_trend = add_standard_indicators(df_trend)
             vp = compute_volume_profile(df_4h)
             
+            # Volatility Analysis
+            atr_series = self.volatility_detector.calculate_atr(df_4h)
+            atr_val = atr_series.iloc[-1] if not pd.isna(atr_series.iloc[-1]) else (price * 0.02)
+            volatility_regime = self.volatility_detector.detect_regime(df_4h)
+
             # 3. Transition Tolerance (Phase 3)
             # If regime changed, reconcile immediately to avoid orphan orders
             old_regime = self.current_regimes.get(symbol)
-            regime = self.regime_detector.detect_regime(df_4h)
+            regime = self.regime_detector.detect_regime(df_4h) # Original regime detection
             
             if old_regime and old_regime != regime:
                 logger.warning(f"[{symbol}] REGIME CHANGE DETECTED: {old_regime} -> {regime}. Immediate reconciliation starting...")
@@ -269,10 +386,7 @@ class BotRunner:
             self.current_regimes[symbol] = regime
 
             # 4. Strategy Analysis
-            if self.config.ANALYSIS_ONLY:
-                position = self.paper_manager.state["positions"].get(symbol, {})
-            else:
-                position = await self.execution.get_position(symbol)
+            position = await self.execution_router.get_position(symbol)
 
             # Track position for dashboard
             if position:
@@ -300,14 +414,18 @@ class BotRunner:
                 'df': df_trend,
                 'volume_profile': vp,
                 'equity': equity,
-                'position': position
+                'position': position,
+                'regime': regime,
+                'volatility_regime': volatility_regime,
+                'atr': atr_val,
+                'unrealized_pnl': unrealized_pnl
             }
             # 4. Generate Strategy Signals
-            signals = await self.router.route_signals(symbol, regime, market_state)
+            signals = await self.strategy_router.route_signals(symbol, regime, market_state)
             self.metrics["signals_processed"] += len(signals)
             
             # Track Orders and History in Live Mode
-            if not self.config.ANALYSIS_ONLY:
+            if self.config.EXECUTION_MODE == 'LIVE':
                 symbol_orders = await self.exchange.fetch_open_orders(symbol)
                 self.current_orders.extend(symbol_orders)
                 
@@ -373,6 +491,17 @@ class BotRunner:
                         await self.telegram.warning(f"⚠️ **Señal Bloqueada**: {symbol}\nMotivo: `{reason}`", dedup_key=f"block_{symbol}")
                         continue
 
+                # NEW: Inventory Risk Control
+                allowed_amount = self.risk_manager.enforce_inventory_limits(symbol, signal, self.current_positions)
+                if allowed_amount <= 0:
+                    logger.warning(f"[Bot] Signal for {symbol} BLOCKED: Inventory limits exceeded.")
+                    continue
+                
+                # Reduce size if necessary
+                if allowed_amount < signal.amount:
+                    logger.warning(f"[Bot] {symbol} Order size reduced from {signal.amount:.4f} to {allowed_amount:.4f} due to inventory limits.")
+                    signal.amount = allowed_amount
+
                 try:
                     # Phase 21: Pre-Execution Log/Alert
                     if self.risk_manager.is_safe_mode and signal.action in [SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT, SignalAction.GRID_PLACE]:
@@ -394,39 +523,10 @@ class BotRunner:
                     logger.info(f"[Bot] {symbol} => EXECUTION START: {signal.action.value} @ {signal.price} (Size: {signal.amount})")
                     await self.telegram.info(f"🚀 **Ejecutando**: {signal.action.value} {symbol}\nPrecio: `{signal.price}`\nCantidad: `{signal.amount}`")
                     
-                    # PAPER EXECUTION
-                    # Phase 21: Consolidated Execution Logic
-                    order_res = None
-                    if self.config.ANALYSIS_ONLY:
-                        self.paper_manager.execute_signal(signal)
-                        order_res = {"id": "PAPER_ORDER", "status": "closed"}
-                        logger.info(f"[Bot] PAPER: Executed {signal.action.value} {symbol}")
-                    else:
-                        # 1. Strategy Specific Execution
-                        if signal.action == SignalAction.GRID_PLACE:
-                            order_res = await self.execution.place_order(symbol, signal.side.name.lower(), 'limit', signal.amount, signal.price)
-                            if order_res and order_res.get('id'):
-                                self.neutral_grid.update_order_id(symbol, signal.price, order_res['id'])
-                        
-                        elif signal.action in [SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT]:
-                            order_res = await self.execution.place_order(symbol, signal.side.name.lower(), 'market', signal.amount)
-                            # Side orders (SL/TP/DCA)
-                            if order_res and order_res.get('id'):
-                                if signal.stop_loss:
-                                    sl_side = 'sell' if signal.side == Side.LONG else 'buy'
-                                    await self.execution.place_order(symbol, sl_side, 'stop', signal.amount, signal.stop_loss, params={'stopPrice': signal.stop_loss, 'reduceOnly': True})
-                                if signal.take_profit:
-                                    tp_side = 'sell' if signal.side == Side.LONG else 'buy'
-                                    await self.execution.place_order(symbol, tp_side, 'limit', signal.amount, signal.take_profit, params={'reduceOnly': True})
-                                
-                                dca_levels_meta = signal.meta.get('dca_levels', [])
-                                for dca_m in dca_levels_meta:
-                                    dca_order = await self.execution.place_order(symbol, signal.side.name.lower(), 'limit', dca_m['amount'], dca_m['price'])
-                                    if dca_order and dca_order.get('id'):
-                                        self.trend_dca.update_order_id(symbol, dca_m['price'], dca_order['id'])
-
-                        elif signal.action in [SignalAction.EXIT_LONG, SignalAction.EXIT_SHORT]:
-                            order_res = await self.execution.place_order(symbol, 'sell' if signal.side == Side.LONG else 'buy', 'market', signal.amount, params={'reduceOnly': True})
+                    # EXECUTION via Router
+                    order_res = await self.execution_router.execute_signal(
+                        signal, neutral_grid=self.neutral_grid, trend_dca=self.trend_dca
+                    )
 
                     # 2. Alert & Metrics Result
                     if order_res:
@@ -483,11 +583,11 @@ class BotRunner:
 
     def _append_paper_record(self, symbol, price, regime, signals_count, virtual_equity):
         """Senior Audit: Proxy to PaperManager to encapsulate persistence logic."""
-        if not hasattr(self, 'paper_manager') or not self.paper_manager:
+        if self.config.EXECUTION_MODE != 'PAPER':
             return
             
         try:
-            self.paper_manager.append_equity_record(
+            self.execution_router.paper_manager.append_equity_record(
                 symbol=symbol,
                 price=price,
                 regime=regime,
@@ -515,19 +615,20 @@ class BotRunner:
         }
         write_bot_state("status.json", status_data)
 
-    def _write_dashboard_state(self, equity, unrealized_pnl, current_prices):
+    def _write_dashboard_state(self, equity, unrealized_pnl, current_prices, target_symbol=None):
         """Write unified state for the dashboard — uses state_manager for atomic writes."""
         try:
-            if self.config.ANALYSIS_ONLY:
-                balance = self.paper_manager.state.get("balance", 0)
-                positions = self.paper_manager.state.get("positions", {})
-                pending = self.paper_manager.state.get("pending_orders", [])
-                history = self.paper_manager.state.get("history", [])
-            else:
+            if self.config.EXECUTION_MODE == 'LIVE':
                 balance = equity - unrealized_pnl
                 positions = self.current_positions
                 pending = self.current_orders
                 history = list(self.current_history)
+            else:
+                metrics = self.execution_router.get_state_metrics()
+                balance = metrics["balance"]
+                positions = metrics["positions"]
+                pending = metrics["pending_orders"]
+                history = metrics["history"]
 
             # Sort history by date descending
             if history:
@@ -557,6 +658,28 @@ class BotRunner:
             write_bot_state(state_path, state)
         except Exception as e:
             logger.warning(f"Failed to write dashboard state: {e}")
+
+    async def close(self):
+        """Exhaustive resource cleanup for bot shutdown."""
+        logger.info("[STOP] Shutting down bot subsystems...")
+        
+        # 1. Alerting systems
+        if hasattr(self, 'telegram'):
+            await self.telegram.close()
+            
+        # 2. Network/Exchange
+        if hasattr(self, 'ws_manager') and self.ws_manager:
+            await self.ws_manager.stop()
+            
+        if hasattr(self, 'exchange') and self.exchange:
+            await self.exchange.close()
+            
+        # 3. Data/DB
+        if hasattr(self, 'db'):
+            # DbManager connections are closed per-call, but we ensure state
+            pass
+            
+        logger.info("[STOP] Bot shutdown complete.")
 
 if __name__ == "__main__":
     runner = BotRunner()

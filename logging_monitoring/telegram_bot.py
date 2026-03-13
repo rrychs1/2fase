@@ -154,6 +154,21 @@ class TelegramBot:
             return True
         return False
 
+    async def close(self):
+        """Close the underlying bot session."""
+        if self.bot is not None:
+            try:
+                # python-telegram-bot async Bot has a shutdown/close mechanism if used with application, 
+                # but if used raw, we should close the networking client if it exists.
+                if hasattr(self.bot, 'shutdown'):
+                    await self.bot.shutdown()
+                elif hasattr(self.bot, 'close'):
+                    await self.bot.close()
+                elif hasattr(self.bot, '_request') and hasattr(self.bot._request, 'stop'):
+                    await self.bot._request.stop()
+            except Exception as e:
+                logger.debug("Error closing Telegram bot: %s", e)
+
     # ── Internal ─────────────────────────────────────────────
 
     def _record_failure(self):

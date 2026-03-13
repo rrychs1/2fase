@@ -6,6 +6,7 @@ import pandas as pd
 import hmac
 import hashlib
 import time
+import random
 from datetime import datetime
 from config.config_loader import Config
 
@@ -16,6 +17,7 @@ class ExchangeClient:
         self.exchange = None
         self.public_exchange = None
         self.sim_mode = Config.TRADING_ENV == 'SIM'
+        self._ob_cache = {}  # {symbol: {"time": ts, "data": ob}}
         self._initialize_clients()
 
     async def fetch_ohlcv(self, symbol, timeframe, limit=500):
@@ -49,6 +51,7 @@ class ExchangeClient:
             if r.status_code == 200:
                 data = r.json()
                 # CCXT Format: [[ts, o, h, l, c, v], ...]
+                self.last_api_success = time.time()
                 return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
             else:
                 logger.error(f"Fallback OHLCV failed for {symbol}: {r.status_code} {r.text}")
@@ -58,9 +61,11 @@ class ExchangeClient:
 
 
     async def _apply_backoff(self):
-        """Apply centralized delay if backoff is active."""
+        """Apply centralized delay if backoff is active with random jitter."""
         if self.backoff_multiplier > 1.0:
-            delay = min(30, (self.backoff_multiplier - 1) * 2) # Caps at 30s
+            jitter = random.uniform(0.1, 1.5)
+            delay = min(30, (self.backoff_multiplier - 1) * 2) + jitter # Caps at 30s + jitter
+            
             if delay > 0.5:
                 logger.warning(f"[Exchange] Rate-limit backoff: Sleeping {delay:.2f}s")
                 await asyncio.sleep(delay)
@@ -108,6 +113,7 @@ class ExchangeClient:
                 r = requests.post(url, headers=headers, timeout=full_timeout)
                 
             if r.status_code == 200:
+                self.last_api_success = time.time()
                 return r.json()
             elif r.status_code in [429, 418]:
                 logger.error(f"RATE LIMIT HIT (Manual): {r.status_code}")
@@ -133,6 +139,7 @@ class ExchangeClient:
         self.backoff_multiplier = 1.0
         self.last_rate_limit_hit = 0
         self.backoff_decay = 0.95 # Decay backoff by 5% each minute (approx)
+        self.last_api_success = 0.0
         
         if self.sim_mode:
             logger.info("SIM Mode active: Bypassing exchange client initialization.")
@@ -429,6 +436,58 @@ class ExchangeClient:
                     'info': p
                 })
         return active
+
+    async def fetch_order_book(self, symbol, limit=100):
+        """Fetch order book with 2-second in-memory cache to prevent spam limits."""
+        now = time.time()
+        
+        # In SIM mode, mock a deep basic order book around current arbitrary price (pseudo-100k)
+        if self.sim_mode:
+            return {"bids": [[99900, 100]], "asks": [[100100, 100]]}
+
+        # Cache check
+        if symbol in self._ob_cache:
+            cache_entry = self._ob_cache[symbol]
+            if now - cache_entry["time"] < 2.0:  # 2 seconds TTL
+                return cache_entry["data"]
+
+        ob = None
+        try:
+            if not Config.USE_TESTNET and self.public_exchange:
+                ob = await self.public_exchange.fetch_order_book(symbol, limit)
+            else:
+                ob = await self._manual_fetch_order_book(symbol, limit)
+        except Exception as e:
+            logger.warning(f"[Exchange] CCXT fetch_order_book failed for {symbol}: {e}. Retrying manually...")
+            ob = await self._manual_fetch_order_book(symbol, limit)
+
+        if ob:
+            self._ob_cache[symbol] = {"time": now, "data": ob}
+        return ob
+
+    async def _manual_fetch_order_book(self, symbol, limit=100):
+        base_url = "https://fapi.binance.com/fapi/v1/depth"
+        if Config.USE_TESTNET:
+            base_url = "https://demo-fapi.binance.com/fapi/v1/depth"
+            
+        params = {
+            "symbol": symbol.replace("/", ""),
+            "limit": limit
+        }
+        
+        try:
+            r = requests.get(base_url, params=params, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "bids": [[float(p), float(q)] for p, q in data.get('bids', [])],
+                    "asks": [[float(p), float(q)] for p, q in data.get('asks', [])]
+                }
+            else:
+                logger.error(f"[Exchange] Manual order book fetch failed: {r.status_code} {r.text}")
+        except Exception as e:
+            logger.error(f"[Exchange] Manual order book exception: {e}")
+        return {"bids": [], "asks": []}
 
     async def fetch_balance(self):
         """Fetch balance with multiple fallbacks, including a direct API request."""

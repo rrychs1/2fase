@@ -14,26 +14,62 @@ class NeutralGridStrategy:
         self.last_rebuild_time: dict[str, float] = {}
         self.consecutive_outside: dict[str, int] = {}
 
-    def generate_grid_levels(self, symbol: str, vp: VolumeProfile, total_amount: float) -> List[GridLevel]:
+    def generate_grid_levels(self, symbol: str, vp: VolumeProfile, total_amount: float, market_state: dict) -> List[GridLevel]:
         """
-        Creates grid levels based on Value Area and POC.
-        Buys between VAL and POC, Sells between POC and VAH.
+        Creates grid levels based on Value Area, POC, and dynamic ATR spacing.
+        grid_spacing = k * ATR
         """
-        num_levels = self.config.GRID_LEVELS
-        buy_prices = np.linspace(vp.val, vp.poc, num_levels // 2 + 1)[:-1] # Exclude POC
-        sell_prices = np.linspace(vp.poc, vp.vah, num_levels // 2 + 1)[1:]  # Exclude POC
+        atr = market_state.get('atr', vp.poc * 0.02)
+        vol_regime = market_state.get('volatility_regime', 'MEDIUM')
+        
+        # Determine the k multiplier based on volatility regime
+        base_k = self.config.GRID_ATR_MULTIPLIER
+        if vol_regime == 'HIGH':
+            k = base_k * 1.5 # Expand grid
+        elif vol_regime == 'LOW':
+            k = base_k * 0.8 # Compress grid
+        else:
+            k = base_k       # Normal
+            
+        grid_spacing = k * atr
+        
+        # Calculate theoretical number of levels
+        val_to_poc_dist = vp.poc - vp.val
+        poc_to_vah_dist = vp.vah - vp.poc
+        
+        num_buy_levels = max(1, int(val_to_poc_dist / grid_spacing))
+        num_sell_levels = max(1, int(poc_to_vah_dist / grid_spacing))
+        
+        total_levels_requested = num_buy_levels + num_sell_levels
+        
+        # Enforce limits
+        max_levels = self.config.GRID_MAX_LEVELS
+        if total_levels_requested > max_levels:
+            logger.warning(f"[Grid] {symbol} {total_levels_requested} levels exceeds MAX ({max_levels}). Scaling spacing up.")
+            # Scale up the spacing proportionally
+            scale_factor = total_levels_requested / max_levels
+            grid_spacing *= scale_factor
+            
+            # Recalculate bounded levels
+            num_buy_levels = max(1, int(val_to_poc_dist / grid_spacing))
+            num_sell_levels = max(1, int(poc_to_vah_dist / grid_spacing))
+
+        # Generate price endpoints explicitly based on calculated spacing from POC
+        buy_prices = [vp.poc - (i * grid_spacing) for i in range(1, num_buy_levels + 1)]
+        sell_prices = [vp.poc + (i * grid_spacing) for i in range(1, num_sell_levels + 1)]
         
         levels = []
-        amount_per_level = total_amount / num_levels
+        actual_total_levels = len(buy_prices) + len(sell_prices)
+        amount_per_level = total_amount / actual_total_levels if actual_total_levels > 0 else total_amount
         
-        for p in buy_prices:
-            price = float(p)
-            levels.append(GridLevel(price=price, side='buy', amount=amount_per_level / price))
-        for p in sell_prices:
-            price = float(p)
-            levels.append(GridLevel(price=price, side='sell', amount=amount_per_level / price))
+        for price in reversed(buy_prices): # Start from lowest
+            levels.append(GridLevel(price=float(price), side='buy', amount=amount_per_level / float(price)))
             
-        logger.info(f"[Grid] {symbol} Generated {len(levels)} levels around POC {vp.poc:.2f}")
+        for price in sell_prices: # Start from closest to POC
+            levels.append(GridLevel(price=float(price), side='sell', amount=amount_per_level / float(price)))
+            
+        logger.info(f"[Grid] {symbol} Generated {len(levels)} levels around POC {vp.poc:.2f}. "
+                    f"Volatility: {vol_regime}, ATR: {atr:.2f}, Spacing: {grid_spacing:.2f}")
         return levels
 
     async def on_market_state(self, symbol: str, market_state: dict) -> List[Signal]:
@@ -82,7 +118,7 @@ class NeutralGridStrategy:
             equity = market_state.get('equity', 10000.0)
             grid_budget = equity * 0.20  # 20% allocation: safer sizing for testnet
             
-            new_levels = self.generate_grid_levels(symbol, vp, grid_budget) 
+            new_levels = self.generate_grid_levels(symbol, vp, grid_budget, market_state) 
             self.grid_states[symbol] = GridState(
                 symbol=symbol,
                 levels=new_levels,

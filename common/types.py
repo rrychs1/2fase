@@ -5,7 +5,7 @@ All shared data structures are defined here for type safety.
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, UTC
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ class Signal:
     take_profit: Optional[float] = None
     strategy: str = ""
     confidence: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -66,7 +66,7 @@ class TradeRecord:
     amount: float = 0.0
     pnl: float = 0.0
     strategy: str = ""
-    entry_time: datetime = field(default_factory=datetime.utcnow)
+    entry_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     exit_time: Optional[datetime] = None
     fees: float = 0.0
 
@@ -175,4 +175,4 @@ class MarketState:
     regime: Regime = Regime.RANGE
     volume_profile: Optional[VolumeProfile] = None
     indicators: Dict[str, float] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))

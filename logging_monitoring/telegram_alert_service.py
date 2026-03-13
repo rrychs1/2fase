@@ -198,6 +198,10 @@ class TelegramAlertService:
         except Exception as e:
             logger.warning("[ALERTS] Failed to flush alerts: %s", e)
 
+    async def close(self):
+        """Close the underlying bot session."""
+        await self.bot.close()
+
     # ── Backwards compatibility ──────────────────────────────
 
     async def send_error_alert(self, msg: str):

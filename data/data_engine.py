@@ -35,6 +35,36 @@ class DataEngine:
         logger.error(f"[DataEngine] Failed to fetch data for {symbol} after {max_retries} attempts.")
         return None
 
-    async def update_ohlcv(self, symbol: str, timeframe: str) -> pd.DataFrame:
-        # Incremental update logic would go here
-        return await self.fetch_ohlcv(symbol, timeframe, limit=100)
+    async def update_ohlcv(self, event) -> pd.DataFrame:
+        """
+        Appends a closed KlineEvent to the existing DataFrame.
+        Maintains the DataFrame size to `limit` rows (e.g., last 500).
+        """
+        key = (event.symbol, event.timeframe)
+        if key not in self.data:
+            logger.debug(f"[DataEngine] Cannot append WS event, missing historical data for {key}")
+            return None
+            
+        df = self.data[key]
+        
+        # Create a new DataFrame row from the event
+        new_row = pd.DataFrame([{
+            'timestamp': pd.to_datetime(event.timestamp, unit='ms'),
+            'open': event.open,
+            'high': event.high,
+            'low': event.low,
+            'close': event.close,
+            'volume': event.volume
+        }])
+        
+        # Append and sort
+        df = pd.concat([df, new_row], ignore_index=True)
+        df = df.sort_values('timestamp').drop_duplicates('timestamp', keep='last')
+        
+        # Enforce rolling window limit (e.g. 500 candles to avoid memory leak)
+        max_limit = getattr(self.exchange.config, 'CANDLES_ANALYSIS_LIMIT', 500)
+        if len(df) > max_limit:
+            df = df.tail(max_limit).reset_index(drop=True)
+            
+        self.data[key] = df
+        return df

@@ -6,6 +6,9 @@ from datetime import date, datetime
 logger = logging.getLogger(__name__)
 
 class RiskManager:
+    DEFAULT_STATE_FILE = "risk_state.json"
+    DEFAULT_LOCK_FILE = ".kill_switch_lock"
+
     def __init__(self, config):
         self.config = config
         self.daily_pnl = 0.0
@@ -17,10 +20,11 @@ class RiskManager:
         self.is_high_caution = False # Phase 5: halted opening due to CB or Alerts
         self.drift_threshold = getattr(config, 'EQUITY_DRIFT_THRESHOLD', 0.05) # 5% default
         self.is_kill_switch_active = False
-        self.last_kill_switch_alert = 0
+        self.last_kill_switch_alert = 0.0
         self.alert_throttle_seconds = 3600 # 1 hour default
         self.reconcile_interval = 20 # Every 20 iterations
-        self.state_file = "risk_state.json"
+        self.state_file = self.DEFAULT_STATE_FILE
+        self.lock_file = self.DEFAULT_LOCK_FILE
         self.cooldowns = {} # Map symbol -> timestamp_end
         self.load_state()
 
@@ -40,7 +44,25 @@ class RiskManager:
             self.save_state()
 
     def load_state(self):
-        """Load persistent risk state from JSON."""
+        """Load persistent risk state from JSON and check hard lock."""
+        # 1. Hard Lock Check
+        if os.path.exists(self.lock_file):
+            try:
+                with open(self.lock_file, 'r') as f:
+                    lock_date_str = f.read().strip()
+                lock_date = date.fromisoformat(lock_date_str)
+                if lock_date < date.today():
+                    logger.info(f"[Risk] Obsolete Kill Switch lock found from {lock_date}. Auto-resetting for new day.")
+                    os.remove(self.lock_file)
+                    self.is_kill_switch_active = False
+                else:
+                    logger.critical(f"[Risk] HARD LOCK ACTIVE. Kill Switch was triggered today ({lock_date}). Trading forcibly blocked.")
+                    self.is_kill_switch_active = True
+            except Exception as e:
+                logger.error(f"[Risk] Corrupted lock file: {e}. Defaulting to safe (Locked).")
+                self.is_kill_switch_active = True
+
+        # 2. Daily State check
         if not os.path.exists(self.state_file):
             return
         try:
@@ -48,13 +70,16 @@ class RiskManager:
                 state = json.load(f)
                 self.day_start_equity = float(state.get('day_start_equity', 0.0))
                 saved_date = date.fromisoformat(state.get('last_reset_date', str(date.today())))
-                self.is_kill_switch_active = bool(state.get('is_kill_switch_active', False))
 
-                # Auto-reset kill switch on new day — prevents yesterday's state from blocking a new session
+                # Only restore software kill switch if it wasn't already handled by the hard lock
+                if not self.is_kill_switch_active:
+                    self.is_kill_switch_active = bool(state.get('is_kill_switch_active', False))
+
+                # Auto-reset on new day
                 if saved_date < date.today():
-                    logger.info(f"[Risk] New day detected. Auto-resetting Kill Switch and day equity.")
+                    logger.info(f"[Risk] New day detected. Auto-resetting day equity.")
                     self.is_kill_switch_active = False
-                    self.day_start_equity = 0.0  # Will be re-anchored on first sync_reference_equity
+                    self.day_start_equity = 0.0  # Will be re-anchored on first sync
                     self.last_reset_date = date.today()
                 else:
                     self.last_reset_date = saved_date
@@ -129,8 +154,8 @@ class RiskManager:
         Validates against exchange filters and caution modes.
         """
         equity = self.reference_equity
-        if equity <= 0 or self.is_safe_mode or self.is_high_caution:
-            reason = "Equity <= 0" if equity <= 0 else ("Safe Mode" if self.is_safe_mode else "High Caution")
+        if equity <= 0 or self.is_safe_mode or self.is_high_caution or self.is_kill_switch_active:
+            reason = "Equity <= 0" if equity <= 0 else ("Safe Mode" if self.is_safe_mode else ("High Caution" if self.is_high_caution else "Kill Switch Active"))
             logger.warning(f"[Risk] {symbol} Skipping size calc: {reason}")
             return 0.0
 
@@ -179,6 +204,61 @@ class RiskManager:
             
         return amount
 
+    def enforce_inventory_limits(self, symbol: str, signal, current_positions: dict) -> float:
+        """
+        Enforce MAX_INVENTORY_RATIO (per asset) and MAX_TOTAL_EXPOSURE (globally).
+        Adjusts signal.amount downwards if necessary.
+        """
+        equity = self.reference_equity
+        if equity <= 0: 
+            return 0.0
+
+        max_inv_pct = float(getattr(self.config, 'MAX_INVENTORY_RATIO', 0.15))
+        max_tot_pct = float(getattr(self.config, 'MAX_TOTAL_EXPOSURE', 0.50))
+
+        max_inv_notional = equity * max_inv_pct
+        max_tot_notional = equity * max_tot_pct
+
+        # Calculate current total exposure
+        current_total_notional = 0.0
+        current_symbol_notional = 0.0
+        
+        # Don't restrict closing orders
+        if "EXIT" in signal.action.value:
+            return signal.amount
+
+        for sym, pos in current_positions.items():
+            if not isinstance(pos, dict): continue
+            price = float(pos.get('average_price', pos.get('entry_price', 0)))
+            amt = float(pos.get('amount', 0))
+            notional = price * amt
+            current_total_notional += notional
+            if sym == symbol:
+                current_symbol_notional += notional
+
+        new_order_notional = signal.price * signal.amount
+
+        # Allowable notional for symbol
+        remaining_symbol_notional = max(0.0, max_inv_notional - current_symbol_notional)
+        
+        # Allowable notional globally
+        remaining_total_notional = max(0.0, max_tot_notional - current_total_notional)
+
+        # Minimum of both remaining allowances
+        allowed_new_notional = min(new_order_notional, remaining_symbol_notional, remaining_total_notional)
+
+        if allowed_new_notional <= 0:
+            logger.warning(f"[Risk] {symbol} {signal.action.value} blocked. Exposure limit reached. "
+                           f"Sym: {current_symbol_notional:.2f}/{max_inv_notional:.2f}, "
+                           f"Tot: {current_total_notional:.2f}/{max_tot_notional:.2f}")
+            return 0.0
+
+        if allowed_new_notional < new_order_notional:
+            allowed_amount = allowed_new_notional / signal.price
+            return allowed_amount
+        else:
+            return signal.amount
+
     def check_position_size(self, symbol, amount, price, equity):
         return amount
 
@@ -209,6 +289,14 @@ class RiskManager:
             if not self.is_kill_switch_active:
                 logger.critical(f"Daily Kill Switch Triggered! PnL={current_pnl:.2f} <= Limit={limit:.2f}")
                 self.is_kill_switch_active = True
+                
+                # Create persistent hard lock
+                try:
+                    with open(self.lock_file, 'w') as f:
+                        f.write(date.today().isoformat())
+                except Exception as e:
+                    logger.error(f"[Risk] Failed to write hard lock file: {e}")
+                    
                 self.save_state()
             return True
         return False

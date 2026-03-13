@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from common.types import Side, SignalAction, Signal
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ class PaperManager:
                 "take_profit": signal.take_profit,
                 "dca_levels": dca_levels,
                 "is_active": True,
-                "opened_at": datetime.utcnow().isoformat()
+                "opened_at": datetime.now(UTC).isoformat()
             }
             logger.info(f"[PAPER] Opened {side} on {symbol} at {signal.price}")
 
@@ -121,7 +121,7 @@ class PaperManager:
                     "symbol": symbol,
                     "side": pos["side"],
                     "pnl": pnl,
-                    "closed_at": datetime.utcnow().isoformat()
+                    "closed_at": datetime.now(UTC).isoformat()
                 })
                 logger.info(f"[PAPER] Closed {pos['side']} on {symbol}. PnL: {pnl:.2f}")
 
@@ -190,7 +190,7 @@ class PaperManager:
                 self.state["balance"] += pnl
                 keys_to_remove.append(symbol)
                 self.state["history"].append({
-                    "symbol": symbol, "side": pos["side"], "pnl": pnl, "type": "SL/TP", "closed_at": datetime.utcnow().isoformat()
+                    "symbol": symbol, "side": pos["side"], "pnl": pnl, "type": "SL/TP", "closed_at": datetime.now(UTC).isoformat()
                 })
 
         for k in keys_to_remove:

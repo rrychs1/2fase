@@ -39,8 +39,8 @@ async def test_regime_transition():
     runner.neutral_grid = MagicMock(spec=NeutralGridStrategy)
     runner.trend_dca = MagicMock(spec=TrendDcaStrategy)
     from strategy.strategy_router import StrategyRouter
-    runner.router = MagicMock(spec=StrategyRouter)
-    runner.router.route_signals = AsyncMock(return_value=[])
+    runner.strategy_router = MagicMock(spec=StrategyRouter)
+    runner.strategy_router.route_signals = AsyncMock(return_value=[])
     
     # Mock Execution
     runner.execution = MagicMock()
@@ -75,26 +75,26 @@ async def test_regime_transition():
     
     # 1. State: RANGE
     runner.regime_detector.detect_regime.return_value = "range"
-    runner.router.route_signals.return_value = []
+    runner.strategy_router.route_signals.return_value = []
     
     logger.info("Current Regime: RANGE")
     await runner.iterate()
     
     from unittest.mock import ANY
-    # Verify router was called with 'range'
-    runner.router.route_signals.assert_called_with("BTC/USDT", "range", ANY)
+    # Verify strategy_router was called with 'range'
+    runner.strategy_router.route_signals.assert_called_with("BTC/USDT", "range", ANY)
     logger.info("Success: Router called with range regime.")
     
     # 2. State Change: TREND
     runner.regime_detector.detect_regime.return_value = "trend"
-    runner.router.route_signals.reset_mock()
-    runner.router.route_signals.return_value = []
+    runner.strategy_router.route_signals.reset_mock()
+    runner.strategy_router.route_signals.return_value = []
     
     logger.info("Switching Regime to: TREND")
     await runner.iterate()
     
-    # Verify router was called with 'trend'
-    runner.router.route_signals.assert_called_with("BTC/USDT", "trend", ANY)
+    # Verify strategy_router was called with 'trend'
+    runner.strategy_router.route_signals.assert_called_with("BTC/USDT", "trend", ANY)
     logger.info("Success: Router called with trend regime.")
 
     logger.info("Regime Transition Verification Complete!")
