@@ -16,10 +16,11 @@ class NeutralGridStrategy:
 
     def generate_grid_levels(self, symbol: str, vp: VolumeProfile, total_amount: float, market_state: dict) -> List[GridLevel]:
         """
-        Creates grid levels based on Value Area, POC, and dynamic ATR spacing.
-        grid_spacing = k * ATR
+        Creates grid levels centered around current price, with dynamic ATR spacing.
+        Limits distance from current price.
         """
-        atr = market_state.get('atr', vp.poc * 0.02)
+        current_price = market_state.get('price', vp.poc)
+        atr = market_state.get('atr', current_price * 0.02)
         vol_regime = market_state.get('volatility_regime', 'MEDIUM')
         
         # Determine the k multiplier based on volatility regime
@@ -33,30 +34,27 @@ class NeutralGridStrategy:
             
         grid_spacing = k * atr
         
-        # Calculate theoretical number of levels
-        val_to_poc_dist = vp.poc - vp.val
-        poc_to_vah_dist = vp.vah - vp.poc
+        # Restrict maximum distance to 2.5% from current price
+        max_distance = current_price * 0.025
         
-        num_buy_levels = max(1, int(val_to_poc_dist / grid_spacing))
-        num_sell_levels = max(1, int(poc_to_vah_dist / grid_spacing))
+        num_buy_levels = max(1, int(max_distance / grid_spacing))
+        num_sell_levels = max(1, int(max_distance / grid_spacing))
         
         total_levels_requested = num_buy_levels + num_sell_levels
         
         # Enforce limits
-        max_levels = self.config.GRID_MAX_LEVELS
+        max_levels = getattr(self.config, 'GRID_MAX_LEVELS', 20)
         if total_levels_requested > max_levels:
             logger.warning(f"[Grid] {symbol} {total_levels_requested} levels exceeds MAX ({max_levels}). Scaling spacing up.")
-            # Scale up the spacing proportionally
             scale_factor = total_levels_requested / max_levels
             grid_spacing *= scale_factor
             
-            # Recalculate bounded levels
-            num_buy_levels = max(1, int(val_to_poc_dist / grid_spacing))
-            num_sell_levels = max(1, int(poc_to_vah_dist / grid_spacing))
+            num_buy_levels = max(1, int(max_distance / grid_spacing))
+            num_sell_levels = max(1, int(max_distance / grid_spacing))
 
-        # Generate price endpoints explicitly based on calculated spacing from POC
-        buy_prices = [vp.poc - (i * grid_spacing) for i in range(1, num_buy_levels + 1)]
-        sell_prices = [vp.poc + (i * grid_spacing) for i in range(1, num_sell_levels + 1)]
+        # Generate price endpoints explicitly based on calculated spacing from current price
+        buy_prices = [current_price - (i * grid_spacing) for i in range(1, num_buy_levels + 1)]
+        sell_prices = [current_price + (i * grid_spacing) for i in range(1, num_sell_levels + 1)]
         
         levels = []
         actual_total_levels = len(buy_prices) + len(sell_prices)
@@ -68,7 +66,7 @@ class NeutralGridStrategy:
         for price in sell_prices: # Start from closest to POC
             levels.append(GridLevel(price=float(price), side='sell', amount=amount_per_level / float(price)))
             
-        logger.info(f"[Grid] {symbol} Generated {len(levels)} levels around POC {vp.poc:.2f}. "
+        logger.info(f"[Grid] {symbol} Generated {len(levels)} levels around Current Price {current_price:.2f}. "
                     f"Volatility: {vol_regime}, ATR: {atr:.2f}, Spacing: {grid_spacing:.2f}")
         return levels
 

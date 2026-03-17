@@ -88,10 +88,20 @@ class TrendDcaStrategy:
 
         # 1. Logic for NEW Entries
         if not position_state or not position_state.get('is_active', False):
+            # Calculate recent high/low for shallow pullback / breakout logic
+            recent_high = df['high'].rolling(window=10).max().iloc[-2]
+            recent_low = df['low'].rolling(window=10).min().iloc[-2]
+            
+            pullback_tolerance = 0.015  # 1.5% pullback
+
             if trend == Side.LONG:
-                # LONG Pullback
-                if prev_row['low'] <= last_row['EMA_fast'] and last_row['close'] > last_row['EMA_fast']:
-                    logger.info(f"[TrendDca] {symbol} Pullback LONG detected at {current_price}")
+                # LONG Pullback (1.5% from recent high) or Breakout
+                is_pullback = current_price <= recent_high * (1 - pullback_tolerance) and current_price > last_row['EMA_slow']
+                is_breakout = current_price > recent_high
+                
+                if is_pullback or is_breakout:
+                    reason = "Pullback" if is_pullback else "Breakout"
+                    logger.info(f"[TrendDca] {symbol} {reason} LONG detected at {current_price}")
                     sl, tp = self.calculate_sl_tp(current_price, Side.LONG, atr)
                     
                     dca_levels = self.plan_dca_levels(current_price, Side.LONG, total_amount)
@@ -113,12 +123,16 @@ class TrendDcaStrategy:
                         dca_levels=dca_levels, stop_loss=sl, take_profit=tp, is_active=True
                     )
                 else:
-                    logger.info(f"[TrendDca] {symbol} Bullish trend. Waiting for pullback to {last_row['EMA_fast']:.2f}")
+                    logger.info(f"[TrendDca] {symbol} Bullish trend. Waiting for {pullback_tolerance*100}% pullback or breakout.")
 
             elif trend == Side.SHORT:
-                # SHORT Pullback
-                if prev_row['high'] >= last_row['EMA_fast'] and last_row['close'] < last_row['EMA_fast']:
-                    logger.info(f"[TrendDca] {symbol} Pullback SHORT detected at {current_price}")
+                # SHORT Pullback (1.5% from recent low) or Breakout
+                is_pullback = current_price >= recent_low * (1 + pullback_tolerance) and current_price < last_row['EMA_slow']
+                is_breakout = current_price < recent_low
+                
+                if is_pullback or is_breakout:
+                    reason = "Pullback" if is_pullback else "Breakout"
+                    logger.info(f"[TrendDca] {symbol} {reason} SHORT detected at {current_price}")
                     sl, tp = self.calculate_sl_tp(current_price, Side.SHORT, atr)
                     
                     dca_levels = self.plan_dca_levels(current_price, Side.SHORT, total_amount)
@@ -140,7 +154,7 @@ class TrendDcaStrategy:
                         dca_levels=dca_levels, stop_loss=sl, take_profit=tp, is_active=True
                     )
                 else:
-                    logger.info(f"[TrendDca] {symbol} Bearish trend. EMA_f={last_row['EMA_fast']:.2f}, PrevHigh={prev_row['high']:.2f}. Waiting for pullback.")
+                    logger.info(f"[TrendDca] {symbol} Bearish trend. Waiting for {pullback_tolerance*100}% pullback or breakout.")
             else:
                 logger.debug(f"[TrendDca] {symbol} Neutral zone (No Trend).")
         

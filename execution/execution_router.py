@@ -4,6 +4,7 @@ from config.config_loader import Config
 from execution.execution_engine import ExecutionEngine
 from execution.paper_manager import PaperManager
 from execution.shadow_executor import ShadowExecutor
+from execution.order_validator import OrderValidator
 
 logger = logging.getLogger(__name__)
 
@@ -23,26 +24,28 @@ class ExecutionRouter:
         
         logger.info(f"[EXEC] ExecutionRouter initialized in {self.mode} mode.")
 
-    async def calculate_liquidity_sizing(self, symbol: str, signal: Signal) -> float:
+    async def calculate_liquidity_sizing(self, symbol: str, signal: Signal) -> tuple[float, float]:
         """
         Calculates the maximum allowed order size based on Order Book depth,
         spread, VWAP slippage, and safety haircuts.
+        Returns (max_amount, mid_price).
         """
         amount = signal.amount
-        if amount <= 0: return 0.0
+        mid_fallback = signal.price if signal.price else 0.0
+        if amount <= 0: return 0.0, mid_fallback
 
         try:
             ob = await self.exchange.fetch_order_book(symbol, limit=100)
             if not ob or ob.get('bids') is None or ob.get('asks') is None:
                 logger.warning(f"[Liquidity] Missing OB for {symbol}. Allowing size but flagging warning.")
-                return amount
+                return amount, mid_fallback
                 
             bids = ob['bids']
             asks = ob['asks']
             
             if not bids or not asks:
                 logger.warning(f"[Liquidity] One side of OB for {symbol} is empty. Blocking.")
-                return 0.0
+                return 0.0, mid_fallback
 
             best_bid = bids[0][0]
             best_ask = asks[0][0]
@@ -53,7 +56,7 @@ class ExecutionRouter:
             max_spread = getattr(self.config, 'MAX_SPREAD_PCT', 0.005)
             if spread_pct > max_spread:
                 logger.warning(f"[Liquidity] Spread {spread_pct*100:.2f}% > Max {max_spread*100:.2f}%. Blocking.")
-                return 0.0
+                return 0.0, mid_price
 
             # 2. Depth Calculation (1% from Mid)
             depth_vol = 0.0
@@ -77,7 +80,7 @@ class ExecutionRouter:
             
             if target_amount <= 0:
                 logger.warning(f"[Liquidity] {symbol} allowed depth <= 0. Blocked.")
-                return 0.0
+                return 0.0, mid_price
                 
             if target_amount < amount:
                 logger.warning(f"[Liquidity] {symbol} Order > 10% Depth. Reduced {amount:.4f} -> {target_amount:.4f}")
@@ -104,11 +107,11 @@ class ExecutionRouter:
                     target_amount = target_amount * slip_factor
                     logger.warning(f"[Liquidity] Auto-scaled size to {target_amount:.4f} to fit slippage tolerance.")
 
-            return target_amount
+            return target_amount, mid_price
             
         except Exception as e:
             logger.error(f"[Liquidity] Error calculating sizing for {symbol}: {e}")
-            return amount
+            return amount, mid_fallback
 
     def get_state_metrics(self):
         """Returns the dictionary representation of state variables for the dashboard."""
@@ -176,7 +179,7 @@ class ExecutionRouter:
 
         # Apply Advanced Liquidity Sizing globally across all modes
         original_amount = signal.amount
-        allowed_amount = await self.calculate_liquidity_sizing(symbol, signal)
+        allowed_amount, mid_price = await self.calculate_liquidity_sizing(symbol, signal)
         
         if allowed_amount <= 0:
             logger.warning(f"[Router] Signal for {symbol} BLOCKED: Zero Liquid Volume.")
@@ -185,6 +188,11 @@ class ExecutionRouter:
         if allowed_amount < original_amount:
             logger.info(f"[Router] Liquid Sizing {symbol}: {original_amount:.4f} -> {allowed_amount:.4f}")
             signal.amount = allowed_amount
+
+        # Validate order constraints (e.g., Min Notional, Price Bounds)
+        signal = OrderValidator.validate_signal(signal, mid_price, self.config)
+        if not signal:
+            return None
 
         if self.mode == 'SHADOW':
             order_res = self.shadow_executor.execute_signal(signal)

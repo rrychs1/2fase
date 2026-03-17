@@ -37,7 +37,7 @@ class TestOrderBookLiquidityConsumption:
         }
         
         # Long signal should look at asks
-        sized_amount = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+        sized_amount, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
         
         # Effective depth = 0.2 * (1 - 0.2 haircut) = 0.16
         # Max allowed = 0.16 * 0.1 ratio = 0.016
@@ -55,7 +55,7 @@ class TestOrderBookLiquidityConsumption:
             'asks': [[60100.0, 10.0], [60200.0, 10.0]]
         }
         
-        sized_amount = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+        sized_amount, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
         assert sized_amount < 0.02
 
 class TestDepthBoundaryAndHaircuts:
@@ -71,7 +71,7 @@ class TestDepthBoundaryAndHaircuts:
             ]
         }
         
-        sized_amount = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+        sized_amount, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
         # Expected depth_vol = 2.0.
         # Haircut 20% -> 1.6. Ratio 10% -> 0.16.
         assert abs(sized_amount - 0.16) < 1e-6
@@ -102,7 +102,7 @@ class TestVWAPSlippageScaling:
             # Slippage = (102.33 - 100) / 100 = 2.33%
             # Max Slip = 0.1%. Scaling factor = 0.001 / 0.0233 = 0.0429
             # Final amount = 1.5 * 0.0429 = 0.064
-            sized = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+            sized, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
             assert sized < 0.1
 
 class TestSpreadAndEdgeCases:
@@ -115,13 +115,13 @@ class TestSpreadAndEdgeCases:
             'asks': [[60200, 10]]
         }
         
-        sized_amount = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+        sized_amount, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
         assert sized_amount == 0.0
 
     @pytest.mark.asyncio
     async def test_empty_book_safe_handling(self, router, mock_exchange, base_signal):
         mock_exchange.fetch_order_book.return_value = None
-        sized_amount = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+        sized_amount, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
         # Should return original amount as fallback or log warning (code says return amount)
         assert sized_amount == base_signal.amount
 
@@ -132,5 +132,5 @@ class TestSpreadAndEdgeCases:
             'bids': [[59900, 10]],
             'asks': []
         }
-        sized_amount = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
+        sized_amount, _ = await router.calculate_liquidity_sizing("BTC/USDT", base_signal)
         assert sized_amount == 0.0

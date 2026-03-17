@@ -30,15 +30,16 @@ def trend_strategy(mock_config):
 
 def test_grid_level_generation_volatility_scaling(grid_strategy):
     vp = VolumeProfile(poc=100.0, vah=110.0, val=90.0)
-    market_state = {'atr': 2.0, 'volatility_regime': 'MEDIUM'}
+    market_state = {'price': 100.0, 'atr': 0.5, 'volatility_regime': 'MEDIUM'}
     
-    # MEDIUM: spacing = 1.0 * 2.0 = 2.0
-    # Buy: 100-2, 100-4, 100-6, 100-8, 100-10 (5 levels)
-    # Sell: 100+2, 100+4, 100+6, 100+8, 100+10 (5 levels)
+    # max_distance = 100 * 0.025 = 2.5
+    # MEDIUM: spacing = 1.0 * 0.5 = 0.5
+    # Buy: 100-0.5, 100-1.0, 100-1.5, 100-2.0, 100-2.5 (5 levels)
+    # Sell: 100+0.5, 100+1.0, 100+1.5, 100+2.0, 100+2.5 (5 levels)
     levels = grid_strategy.generate_grid_levels("BTC/USDT", vp, 1000.0, market_state)
     assert len(levels) == 10
-    assert levels[0].price == 90.0  # Lowest buy
-    assert levels[-1].price == 110.0 # Highest sell
+    assert levels[0].price == 97.5  # Lowest buy
+    assert levels[-1].price == 102.5 # Highest sell
 
     # HIGH: spacing = 1.5 * 2.0 = 3.0
     market_state['volatility_regime'] = 'HIGH'

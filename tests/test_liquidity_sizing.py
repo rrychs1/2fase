@@ -39,7 +39,7 @@ async def test_liquidity_sizing_normal_pass(router):
     
     signal = Signal(symbol="BTC", action=SignalAction.ENTER_LONG, side=Side.LONG, price=100.1, amount=50.0)
     
-    allowed = await router.calculate_liquidity_sizing("BTC", signal)
+    allowed, _ = await router.calculate_liquidity_sizing("BTC", signal)
     assert allowed == 50.0 # Full amount allowed
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_liquidity_sizing_depth_limit(router):
     
     signal = Signal(symbol="BTC", action=SignalAction.ENTER_LONG, side=Side.LONG, price=100.1, amount=200.0)
     
-    allowed = await router.calculate_liquidity_sizing("BTC", signal)
+    allowed, _ = await router.calculate_liquidity_sizing("BTC", signal)
     # Target amount is capped at max depth limit (80)
     # Then checks VWAP.
     # 80 units eaten at 100.1. VWAP = 100.1. Mid = 100.
@@ -90,7 +90,7 @@ async def test_liquidity_sizing_vwap_slippage(router):
     # Ratio = 0.2 / 0.495 = ~0.404.
     # Final amount = 80 * 0.404 = 32.32
     
-    allowed = await router.calculate_liquidity_sizing("BTC", signal)
+    allowed, _ = await router.calculate_liquidity_sizing("BTC", signal)
     
     assert allowed < 80.0
     assert abs(allowed - 32.32) < 0.1
@@ -104,7 +104,7 @@ async def test_liquidity_sizing_spread_protection(router):
     }
     
     signal = Signal(symbol="BTC", action=SignalAction.ENTER_LONG, side=Side.LONG, price=110.0, amount=50.0)
-    allowed = await router.calculate_liquidity_sizing("BTC", signal)
+    allowed, _ = await router.calculate_liquidity_sizing("BTC", signal)
     
     # Blocked completely.
     assert allowed == 0.0
@@ -114,7 +114,7 @@ async def test_liquidity_sizing_empty_ob(router):
     router.exchange.mock_ob = {"bids": [], "asks": []}
     
     signal = Signal(symbol="BTC", action=SignalAction.ENTER_LONG, side=Side.LONG, price=100.0, amount=50.0)
-    allowed = await router.calculate_liquidity_sizing("BTC", signal)
+    allowed, _ = await router.calculate_liquidity_sizing("BTC", signal)
     
     # Blocked for safety when book is empty.
     assert allowed == 0.0

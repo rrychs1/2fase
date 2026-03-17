@@ -181,7 +181,17 @@ class WebsocketManager:
         while self.is_running:
             await asyncio.sleep(1) # Check every second for better responsiveness
             now = time.time()
-            if self.ws and not self.ws.closed:
+                # Safely check if websocket is open across websockets library versions
+            is_ws_open = False
+            if self.ws:
+                if hasattr(self.ws, 'state'):
+                    is_ws_open = self.ws.state.name == 'OPEN'
+                elif hasattr(self.ws, 'open'):
+                    is_ws_open = self.ws.open
+                else:
+                    is_ws_open = not getattr(self.ws, 'closed', False)
+                    
+            if is_ws_open:
                 idle_time = now - self.last_message_time
                 if idle_time > self.heartbeat_timeout:
                     logger.error(f"[WS] Heartbeat timeout! No messages for {idle_time:.0f}s. Forcing reconnect...")

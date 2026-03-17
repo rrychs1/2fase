@@ -56,8 +56,9 @@ class Config:
     
     KILL_SWITCH_ENABLED = os.getenv('KILL_SWITCH_ENABLED', 'True').lower() == 'true'
     COOLDOWN_MINUTES = float(os.getenv('COOLDOWN_MINUTES', 5.0))
-    MIN_NOTIONAL_USD = float(os.getenv('MIN_NOTIONAL_USD', 5.1))
-    
+    MIN_NOTIONAL = float(os.getenv('MIN_NOTIONAL', 100.0))  # Testnet often requires 100+
+    MAX_PRICE_DEVIATION_PCT = float(os.getenv('MAX_PRICE_DEVIATION_PCT', 0.05))
+
     # --- Operational ---
     POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
     CANDLES_ANALYSIS_LIMIT = int(os.getenv('CANDLES_ANALYSIS_LIMIT', 200))
