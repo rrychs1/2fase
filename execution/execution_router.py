@@ -5,6 +5,7 @@ from execution.execution_engine import ExecutionEngine
 from execution.paper_manager import PaperManager
 from execution.shadow_executor import ShadowExecutor
 from execution.order_validator import OrderValidator
+from risk.core_risk_engine import CoreRiskEngine
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ class ExecutionRouter:
         self.paper_manager = PaperManager()
         self.shadow_executor = ShadowExecutor()
         self.exchange = exchange_client
+        
+        self.risk_engine = CoreRiskEngine(config, self.get_state_metrics)
         
         logger.info(f"[EXEC] ExecutionRouter initialized in {self.mode} mode.")
 
@@ -161,7 +164,7 @@ class ExecutionRouter:
             self.paper_manager.update_positions(current_prices)
 
     async def close_all_positions(self, current_prices: dict = None):
-        """Emergency Close All"""
+        """Emergency Close All and Cancel Open Orders"""
         if self.mode == 'SHADOW':
             self.shadow_executor.close_all_positions(current_prices or {})
         elif self.mode == 'PAPER':
@@ -169,6 +172,9 @@ class ExecutionRouter:
             self.paper_manager.state["pending_orders"] = []
         else:
             await self.live_engine.close_all_positions()
+            positions = await self.live_engine.fetch_positions()
+            for p in positions:
+                await self.live_engine.cancel_all_orders(p['symbol'])
 
     async def execute_signal(self, signal: Signal, neutral_grid=None, trend_dca=None):
         """
@@ -176,6 +182,16 @@ class ExecutionRouter:
         Returns the order response dict or None on failure.
         """
         symbol = signal.symbol
+
+        # 1. CORE RISK ENGINE VALIDATION (HARD BLOCK)
+        if self.risk_engine.should_shutdown():
+            logger.critical("[Router] HARD KILL SWITCH TRIGGERED: Global risk limits breached. Cancelling all orders & closing positions.")
+            await self.close_all_positions()
+            return None
+
+        if not self.risk_engine.validate_order(signal):
+            logger.error(f"[Router] Order for {symbol} rejected by CoreRiskEngine constraints.")
+            return None
 
         # Apply Advanced Liquidity Sizing globally across all modes
         original_amount = signal.amount

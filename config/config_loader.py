@@ -40,6 +40,12 @@ class Config:
     MAX_INVENTORY_RATIO = float(os.getenv('MAX_INVENTORY_RATIO', '0.15'))
     MAX_TOTAL_EXPOSURE = float(os.getenv('MAX_TOTAL_EXPOSURE', '0.50'))
     
+    # Core Risk Engine Limits (Hard Blocks)
+    RISK_MAX_DRAWDOWN = float(os.getenv('RISK_MAX_DRAWDOWN', '0.2'))
+    RISK_MAX_DAILY_LOSS = float(os.getenv('RISK_MAX_DAILY_LOSS', '0.05'))
+    RISK_MAX_POSITION_PER_SYMBOL = float(os.getenv('RISK_MAX_POSITION_PER_SYMBOL', '0.1'))
+    RISK_MAX_OPEN_POSITIONS = int(os.getenv('RISK_MAX_OPEN_POSITIONS', '5'))
+    
     # Prometheus Metrics
     ENABLE_METRICS = os.getenv("ENABLE_METRICS", "True").lower() == "true"
     METRICS_PORT = int(os.getenv("METRICS_PORT", 8000)) 
