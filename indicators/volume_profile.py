@@ -27,14 +27,16 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 24) -> VolumeProfile:
         vol_below = hist[low_idx-1] if low_idx > 0 else 0
         vol_above = hist[high_idx+1] if high_idx < bins-1 else 0
         
-        if vol_below > vol_above:
+        if vol_below > vol_above or (vol_below == vol_above and low_idx > 0):
             low_idx -= 1
             current_volume += vol_below
-        else:
+        elif high_idx < bins - 1:
             high_idx += 1
             current_volume += vol_above
-        
-        if low_idx == 0 and high_idx == bins - 1:
+        else:
+            break
+            
+        if low_idx <= 0 and high_idx >= bins - 1:
             break
             
     val = bin_edges[low_idx]

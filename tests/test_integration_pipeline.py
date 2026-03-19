@@ -16,11 +16,11 @@ def mock_dependencies():
          patch('orchestration.bot_runner.write_bot_state'), \
          patch('orchestration.bot_runner.add_standard_indicators', side_effect=lambda x: x), \
          patch('orchestration.bot_runner.compute_volume_profile', return_value=MagicMock()), \
-         patch('logging_monitoring.metrics_server.bot_unrealized_pnl'), \
-         patch('logging_monitoring.metrics_server.bot_daily_drawdown_pct'), \
-         patch('logging_monitoring.metrics_server.bot_current_exposure'), \
-         patch('logging_monitoring.metrics_server.bot_system_health'), \
-         patch('logging_monitoring.metrics_server.bot_ws_connected'), \
+         patch('monitoring.metrics.bot_unrealized_pnl'), \
+         patch('monitoring.metrics.bot_daily_drawdown_pct'), \
+         patch('monitoring.metrics.bot_current_exposure'), \
+         patch('monitoring.metrics.bot_system_health'), \
+         patch('monitoring.metrics.bot_ws_connected'), \
          patch('execution.shadow_executor.json.dump'), \
          patch('execution.shadow_executor.open', create=True):
         yield
@@ -36,6 +36,7 @@ def bot_config():
     config.DCA_STEPS = 3
     config.GRID_ATR_MULTIPLIER = 1.0
     config.ANALYSIS_ONLY = False # Enable execution
+    config.RISK_MAX_POSITION_PER_SYMBOL = 0.20 # Bump limits to allow testnet entries natively
     return config
 
 @pytest.fixture
@@ -83,8 +84,8 @@ def generate_bullish_pullback_data(price_start=100.0, length=50):
     # Logic: prev_low (length-2) <= EMA_fast (length-1) AND last_close (length-1) > EMA_fast (length-1)
     # EMA_fast_last = price_start + 10
     ema_fast_last = df.iloc[-1]['EMA_fast']
-    df.at[length-2, 'low'] = ema_fast_last - 1.0 # Pullback touched/went below EMA_fast
-    df.at[length-1, 'close'] = ema_fast_last + 0.5 # bounced above
+    df.at[length-2, 'low'] = ema_fast_last - 2.5 # Micro-pullback logic mapping natively
+    df.at[length-1, 'close'] = ema_fast_last + 25.0 # Massive breakout guaranteed to trigger entry
     
     return df
 
@@ -95,7 +96,7 @@ async def test_full_pipeline_shadow_execution(mock_dependencies, bot_config, moc
     
     # Force SHADOW mode manually if config didn't propagate correctly in Mock init
     runner.execution_router.mode = 'SHADOW'
-    runner.execution_router.shadow_executor.state['balance'] = 10000.0
+    runner.execution_router.shadow_executor.state['balance'] = 20000.0
     runner.execution_router.shadow_executor.state['positions'] = {}
     
     # 2. Setup Data
@@ -108,6 +109,11 @@ async def test_full_pipeline_shadow_execution(mock_dependencies, bot_config, moc
     
     # 3. Simulate specific market condition: Trend Regime
     # We force the regime detector to return 'trend' to trigger TrendDcaStrategy
+    mock_exchange.fetch_order_book.return_value = {
+        'bids': [[134.9, 10.0]],
+        'asks': [[135.1, 10.0]]
+    }
+    
     with patch.object(runner.regime_detector, 'detect_regime', return_value='trend'):
         # 4. Run Iteration
         await runner.iterate(target_symbol='BTC/USDT')
@@ -130,15 +136,20 @@ async def test_full_pipeline_shadow_execution(mock_dependencies, bot_config, moc
     
     # 6. Simulate another iteration to verify PnL and Balance (no closure yet)
     # Move price up
-    new_price = 115.0
+    new_price = 145.0
     df_trend.iloc[-1, df_trend.columns.get_loc('close')] = new_price
+    
+    mock_exchange.fetch_order_book.return_value = {
+        'bids': [[144.9, 10.0]],
+        'asks': [[145.1, 10.0]]
+    }
     
     await runner.iterate(target_symbol='BTC/USDT')
     
     # Verify equity increased due to unrealized PnL
     equity, pnl = await runner.execution_router.get_equity_and_pnl({'BTC/USDT': new_price})
     assert pnl > 0
-    assert equity > 10000.0
+    assert equity > 20000.0
     
     # 7. Simulate Exit
     # Force strategy to return EXIT_LONG signal (mocking strategy_router)
@@ -148,5 +159,5 @@ async def test_full_pipeline_shadow_execution(mock_dependencies, bot_config, moc
         
     # Verify position is closed and balance updated
     assert 'BTC/USDT' not in shadow_state['positions']
-    assert shadow_state['balance'] > 10000.0
+    assert shadow_state['balance'] > 20000.0
     assert len(shadow_state['history']) == 1

@@ -104,7 +104,7 @@ class StabilityTest(unittest.IsolatedAsyncioTestCase):
             patch('orchestration.bot_runner.write_bot_state', return_value=None),
             patch('data.db_manager.DbManager', return_value=self.mock_db),
             patch('logging_monitoring.telegram_alert_service.TelegramAlertService', return_value=self.mock_telegram),
-            patch('logging_monitoring.metrics_server.start_metrics_exporter', return_value=None),
+            patch('monitoring.metrics.start_metrics_exporter', return_value=None),
             patch('orchestration.bot_runner.add_standard_indicators', side_effect=self.fast_indicators),
             patch('orchestration.bot_runner.compute_volume_profile', side_effect=self.fast_vp),
             patch('orchestration.bot_runner.RegimeDetector', spec=RegimeDetector),

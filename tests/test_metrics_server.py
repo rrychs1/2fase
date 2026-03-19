@@ -1,5 +1,5 @@
 import pytest
-from logging_monitoring.metrics_server import (
+from monitoring.metrics import (
     bot_total_trades, bot_winning_trades, bot_realized_pnl,
     bot_unrealized_pnl, bot_daily_drawdown_pct, bot_current_exposure,
     bot_system_health, bot_ws_connected

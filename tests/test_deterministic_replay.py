@@ -89,7 +89,7 @@ class DeterministicReplayTest(unittest.IsolatedAsyncioTestCase):
              patch('orchestration.bot_runner.write_bot_state', return_value=None), \
              patch('data.db_manager.DbManager') as mock_db_class, \
              patch('logging_monitoring.telegram_alert_service.TelegramAlertService'), \
-             patch('logging_monitoring.metrics_server.start_metrics_exporter'):
+             patch('monitoring.metrics.start_metrics_exporter'):
             
             mock_db = mock_db_class.return_value
             # Record every call to save_trade

@@ -45,11 +45,11 @@ def mock_deps():
          patch('orchestration.bot_runner.write_bot_state'), \
          patch('orchestration.bot_runner.add_standard_indicators', side_effect=lambda x: x), \
          patch('orchestration.bot_runner.compute_volume_profile', return_value=dummy_vp), \
-         patch('logging_monitoring.metrics_server.bot_unrealized_pnl'), \
-         patch('logging_monitoring.metrics_server.bot_daily_drawdown_pct'), \
-         patch('logging_monitoring.metrics_server.bot_current_exposure'), \
-         patch('logging_monitoring.metrics_server.bot_system_health'), \
-         patch('logging_monitoring.metrics_server.bot_ws_connected'), \
+         patch('monitoring.metrics.bot_unrealized_pnl'), \
+         patch('monitoring.metrics.bot_daily_drawdown_pct'), \
+         patch('monitoring.metrics.bot_current_exposure'), \
+         patch('monitoring.metrics.bot_system_health'), \
+         patch('monitoring.metrics.bot_ws_connected'), \
          patch('execution.shadow_executor.json.dump'), \
          patch('execution.shadow_executor.open', create=True):
         yield

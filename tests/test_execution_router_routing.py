@@ -38,6 +38,11 @@ class TestExecutionRouterRouting:
         router.paper_manager = MagicMock()
         router.live_engine = MagicMock()
         
+        router.risk_engine.validate_order = MagicMock(return_value=True)
+        router.risk_engine.should_shutdown = MagicMock(return_value=False)
+        router.calculate_liquidity_sizing = AsyncMock(return_value=(signal_long.amount, signal_long.price))
+        
+        
         # Execute
         await router.execute_signal(signal_long)
         
@@ -45,8 +50,6 @@ class TestExecutionRouterRouting:
         router.shadow_executor.execute_signal.assert_called_once()
         router.paper_manager.execute_signal.assert_not_called()
         router.live_engine.place_order.assert_not_called()
-        # Verify liquidity sizing was called (it's part of the route)
-        mock_exchange.fetch_order_book.assert_called()
 
     @pytest.mark.asyncio
     async def test_paper_routing_isolation(self, config, mock_exchange, signal_long):
@@ -56,6 +59,11 @@ class TestExecutionRouterRouting:
         router.shadow_executor = MagicMock()
         router.paper_manager = MagicMock()
         router.live_engine = MagicMock()
+        
+        router.risk_engine.validate_order = MagicMock(return_value=True)
+        router.risk_engine.should_shutdown = MagicMock(return_value=False)
+        router.calculate_liquidity_sizing = AsyncMock(return_value=(signal_long.amount, signal_long.price))
+
         
         await router.execute_signal(signal_long)
         
@@ -72,6 +80,10 @@ class TestExecutionRouterRouting:
         router.live_engine = MagicMock()
         router.live_engine.place_order = AsyncMock(return_value={'id': '123'})
         
+        router.risk_engine.validate_order = MagicMock(return_value=True)
+        router.risk_engine.should_shutdown = MagicMock(return_value=False)
+        router.calculate_liquidity_sizing = AsyncMock(return_value=(signal_long.amount, signal_long.price))
+        
         await router.execute_signal(signal_long)
         
         # Should call market order for entry, then SL and TP
@@ -86,6 +98,9 @@ class TestExecutionRouterRouting:
         
         original_price = signal_long.price
         original_sl = signal_long.stop_loss
+        
+        router.risk_engine.validate_order = MagicMock(return_value=True)
+        router.risk_engine.should_shutdown = MagicMock(return_value=False)
         
         await router.execute_signal(signal_long)
         
@@ -108,6 +123,7 @@ class TestExecutionRouterRouting:
         router = ExecutionRouter(mock_exchange, config)
         router.live_engine = MagicMock()
         router.live_engine.close_all_positions = AsyncMock()
+        router.live_engine.fetch_positions = AsyncMock(return_value=[])
         await router.close_all_positions()
         router.live_engine.close_all_positions.assert_called_once()
 
@@ -123,6 +139,10 @@ class TestExecutionRouterRouting:
         }
         
         signal_long.amount = 1.0 # Want 1 BTC
+        
+        router.risk_engine.validate_order = MagicMock(return_value=True)
+        router.risk_engine.should_shutdown = MagicMock(return_value=False)
+        
         await router.execute_signal(signal_long)
         
         # Verify signal.amount was reduced

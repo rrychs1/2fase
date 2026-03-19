@@ -1,69 +1,38 @@
-# ═══════════════════════════════════════════════════════════════
-#  Dockerfile — Multi-stage build for the trading bot
-# ═══════════════════════════════════════════════════════════════
-#
-#  Stage 1 (builder): compile C extensions (numpy, scipy, etc.)
-#  Stage 2 (runner):  lean production image (~200 MB vs ~800 MB)
-#
+# Base image
+FROM python:3.11-slim
 
-# ── Stage 1: Builder ─────────────────────────────────────────
-FROM python:3.11-slim AS builder
+# Prevent write bytecode and force unbuffered logging natively
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV DASHBOARD_HOST "0.0.0.0"
 
-WORKDIR /build
-
-# Install build tools needed to compile wheels (numpy, scipy, ta, etc.)
+# Install system dependencies (build-essential for TA Libs, sqlite3 for DB, supervisor for process management)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    gcc \
+    g++ \
+    libffi-dev \
+    sqlite3 \
+    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies into a separate prefix
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
-
-# ── Stage 2: Runner (production) ─────────────────────────────
-FROM python:3.11-slim AS runner
-
-# Prevent .pyc files & enable real-time log output
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
+# Create application directory
 WORKDIR /app
 
-# Copy compiled Python packages from builder
-COPY --from=builder /install /usr/local
+# Upgrade pip securely
+RUN pip install --upgrade pip setuptools wheel
 
-# Minimal runtime dependency (curl for healthchecks)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Install Python requirements
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Create a non-root user for security
-RUN groupadd --gid 1000 botuser \
-    && useradd --uid 1000 --gid botuser --create-home botuser
+# Create necessary local directories for SQLite and standard Logs binding
+RUN mkdir -p /app/data /app/logs /tmp
 
-# Copy application source
-COPY --chown=botuser:botuser . .
+# Copy all source code maps natively
+COPY . /app/
 
-# Ensure persistence directories exist and are writable
-RUN mkdir -p logs data && chown -R botuser:botuser logs data
+# Expose Dashboard and Prometheus Metrics Native Ports
+EXPOSE 8050 8000
 
-# ── Build-time verification ──────────────────────────────────
-# Compile all .py files to catch syntax errors early.
-# Then verify critical imports are available.
-RUN python -m compileall -q /app \
-    && python -c "\
-import flask, ccxt, pandas, numpy, ta, scipy, sklearn; \
-from state.state_manager import write_bot_state, load_bot_state; \
-from data.db_manager import DbManager; \
-from config.config_loader import Config; \
-print('[BUILD] All critical imports verified.')"
-
-# Dashboard port (must match .env DASHBOARD_PORT)
-EXPOSE 8000
-
-# Switch to non-root user
-USER botuser
-
-# Default: run the bot (overridden in docker-compose for dashboard)
-CMD ["python", "main.py"]
+# Run native supervisor mapping dynamically loading the application logic loops
+CMD ["supervisord", "-n", "-c", "/app/deployment/supervisord.conf"]

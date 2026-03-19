@@ -35,7 +35,7 @@ class CoreRiskEngine:
         price = order.price or 0.0
 
         if equity <= 0:
-            logger.error(f"[RiskEngine] Blocked {order.action.value} on {symbol}: Zero or negative equity.")
+            logger.error(f"[RiskEngine] Blocked {order.action.value} on {symbol}: Zero or negative equity.", extra={"event": "RiskLimitBreached", "symbol": symbol, "reason": "ZeroEquity"})
             return False
 
         # 1. Max open positions
@@ -44,7 +44,7 @@ class CoreRiskEngine:
         # If it's a new entry and we have reached the max open limit
         if order.action in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT) and symbol not in active_positions:
             if len(active_positions) >= max_open:
-                logger.error(f"[RiskEngine] Blocked {order.action.value} on {symbol}: Max open positions ({max_open}) limit breached.")
+                logger.error(f"[RiskEngine] Blocked {order.action.value} on {symbol}: Max open positions ({max_open}) limit breached.", extra={"event": "RiskLimitBreached", "symbol": symbol, "reason": "MaxOpenPositions"})
                 return False
 
         # 2. Max exposure per symbol
@@ -62,7 +62,7 @@ class CoreRiskEngine:
         if order.action not in (SignalAction.EXIT_LONG, SignalAction.EXIT_SHORT):
             if current_notional + new_notional > max_notional_per_symbol:
                 logger.error(f"[RiskEngine] Blocked {order.action.value} on {symbol}: Max exposure per symbol breached. "
-                             f"Limit: {max_pos_limit*100}%. Current Notional: {current_notional:.2f}, Attempted Added Notional: {new_notional:.2f}")
+                             f"Limit: {max_pos_limit*100}%. Current Notional: {current_notional:.2f}, Attempted Added Notional: {new_notional:.2f}", extra={"event": "RiskLimitBreached", "symbol": symbol, "reason": "MaxPositionExposure"})
                 return False
 
         # 3. Max total exposure
@@ -75,7 +75,7 @@ class CoreRiskEngine:
         if order.action not in (SignalAction.EXIT_LONG, SignalAction.EXIT_SHORT):
             if overall_notional + new_notional > equity * max_total_limit:
                 logger.error(f"[RiskEngine] Blocked {order.action.value} on {symbol}: Total max exposure breached. "
-                             f"Limit: {max_total_limit*100}% of Equity.")
+                             f"Limit: {max_total_limit*100}% of Equity.", extra={"event": "RiskLimitBreached", "symbol": symbol, "reason": "MaxTotalExposure"})
                 return False
 
         return True
@@ -104,7 +104,9 @@ class CoreRiskEngine:
         max_drawdown = getattr(self.config, 'RISK_MAX_DRAWDOWN', 0.2)
         
         if drawdown > max_drawdown:
-            logger.critical(f"[RiskEngine] HARD KILL SWITCH TRIGGERED: Max drawdown breached! {drawdown*100:.2f}% > {max_drawdown*100:.2f}%")
+            logger.critical(f"[RiskEngine] HARD KILL SWITCH TRIGGERED: Max drawdown breached! {drawdown*100:.2f}% > {max_drawdown*100:.2f}%", extra={"event": "KillSwitchTriggered", "symbol": "SYSTEM", "reason": "MaxDrawdown", "drawdown_pct": float(drawdown*100)})
+            from monitoring.metrics import bot_system_health
+            bot_system_health.set(0)
             return True
             
         start_balance = state.get("start_of_day_balance", balance)
@@ -112,7 +114,9 @@ class CoreRiskEngine:
         max_daily_loss = getattr(self.config, 'RISK_MAX_DAILY_LOSS', 0.05)
         
         if daily_loss > max_daily_loss:
-            logger.critical(f"[RiskEngine] HARD KILL SWITCH TRIGGERED: Max daily loss breached! {daily_loss*100:.2f}% > {max_daily_loss*100:.2f}%")
+            logger.critical(f"[RiskEngine] HARD KILL SWITCH TRIGGERED: Max daily loss breached! {daily_loss*100:.2f}% > {max_daily_loss*100:.2f}%", extra={"event": "KillSwitchTriggered", "symbol": "SYSTEM", "reason": "MaxDailyLoss"})
+            from monitoring.metrics import bot_system_health
+            bot_system_health.set(0)
             return True
             
         return False

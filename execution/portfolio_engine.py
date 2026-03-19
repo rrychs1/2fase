@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime, UTC
-from logging_monitoring.metrics_server import bot_total_trades, bot_winning_trades, bot_realized_pnl
+from monitoring.metrics import bot_total_trades, bot_winning_trades, bot_realized_pnl
 
 logger = logging.getLogger(__name__)
 
