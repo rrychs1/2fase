@@ -1,0 +1,58 @@
+# Environment variables (NEVER commit)
+.env
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+
+# Virtual environment
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and runtime data
+logs/
+*.log
+backups/
+risk_state.json
+status.json
+dashboard_state.json
+virtual_account.json
+health_state.json
+.dashboard.lock
+data/*.db
+
+# Large data files
+*.jsonl
+analytics/reports/
+backtesting/data_cache/
+backtesting/reports/
+
+# Debug / temp files
+t*.txt
+*.txt
+analysis_results.txt
+backtest_error.txt
+log_analysis_report.txt
+bot_output.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent artifacts
+.agent/
+.pytest_cache/

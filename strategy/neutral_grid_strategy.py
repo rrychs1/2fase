@@ -1,0 +1,260 @@
+import pandas as pd
+import numpy as np
+import logging
+import time
+from common.types import Side, SignalAction, Signal, GridLevel, GridState, VolumeProfile
+from typing import List
+
+logger = logging.getLogger(__name__)
+
+
+class NeutralGridStrategy:
+    def __init__(self, config):
+        self.config = config
+        self.grid_states: dict[str, GridState] = {}  # symbol -> GridState
+        self.last_rebuild_time: dict[str, float] = {}
+        self.consecutive_outside: dict[str, int] = {}
+
+    def generate_grid_levels(
+        self, symbol: str, vp: VolumeProfile, total_amount: float, market_state: dict
+    ) -> List[GridLevel]:
+        """
+        Creates grid levels centered around current price, with dynamic ATR spacing.
+        Limits distance from current price.
+        """
+        current_price = market_state.get("price", vp.poc)
+        atr = market_state.get("atr", current_price * 0.02)
+        vol_regime = market_state.get("volatility_regime", "MEDIUM")
+
+        # Determine the k multiplier based on volatility regime
+        base_k = self.config.GRID_ATR_MULTIPLIER
+        if vol_regime == "HIGH":
+            k = base_k * 1.5  # Expand grid
+        elif vol_regime == "LOW":
+            k = base_k * 0.8  # Compress grid
+        else:
+            k = base_k  # Normal
+
+        grid_spacing = k * atr
+
+        # Restrict maximum distance to 2.5% from current price
+        max_distance = current_price * 0.025
+
+        num_buy_levels = max(1, int(max_distance / grid_spacing))
+        num_sell_levels = max(1, int(max_distance / grid_spacing))
+
+        total_levels_requested = num_buy_levels + num_sell_levels
+
+        # Enforce limits
+        max_levels = getattr(self.config, "GRID_MAX_LEVELS", 20)
+        if total_levels_requested > max_levels:
+            logger.warning(
+                f"[Grid] {symbol} {total_levels_requested} levels exceeds MAX ({max_levels}). Scaling spacing up."
+            )
+            scale_factor = total_levels_requested / max_levels
+            grid_spacing *= scale_factor
+
+            num_buy_levels = max(1, int(max_distance / grid_spacing))
+            num_sell_levels = max(1, int(max_distance / grid_spacing))
+
+        # Generate price endpoints explicitly based on calculated spacing from current price
+        buy_prices = [
+            current_price - (i * grid_spacing) for i in range(1, num_buy_levels + 1)
+        ]
+        sell_prices = [
+            current_price + (i * grid_spacing) for i in range(1, num_sell_levels + 1)
+        ]
+
+        levels = []
+        actual_total_levels = len(buy_prices) + len(sell_prices)
+        amount_per_level = (
+            total_amount / actual_total_levels
+            if actual_total_levels > 0
+            else total_amount
+        )
+
+        for price in reversed(buy_prices):  # Start from lowest
+            levels.append(
+                GridLevel(
+                    price=float(price),
+                    side="buy",
+                    amount=amount_per_level / float(price),
+                )
+            )
+
+        for price in sell_prices:  # Start from closest to POC
+            levels.append(
+                GridLevel(
+                    price=float(price),
+                    side="sell",
+                    amount=amount_per_level / float(price),
+                )
+            )
+
+        logger.info(
+            f"[Grid] {symbol} Generated {len(levels)} levels around Current Price {current_price:.2f}. "
+            f"Volatility: {vol_regime}, ATR: {atr:.2f}, Spacing: {grid_spacing:.2f}"
+        )
+        return levels
+
+    async def on_market_state(self, symbol: str, market_state: dict) -> List[Signal]:
+        """
+        Evaluate if we need to place a new grid or manage existing orders.
+        """
+        current_price = market_state["price"]
+        vp = market_state.get("volume_profile")
+        position_state = market_state.get("position")
+
+        logger.debug(
+            f"[Grid] {symbol} Price: {current_price} | VA: {vp.val:.2f} - {vp.vah:.2f}"
+        )
+        signals = []
+
+        # 1. Check if we need to initialize or rebuild the grid
+        state = self.grid_states.get(symbol)
+        if state and state.is_active:
+            logger.debug(
+                f"[Grid] {symbol} Grid already active with {len(state.levels)} levels."
+            )
+
+        rebuild_needed = False
+        if not state or not state.is_active:
+            rebuild_needed = True
+            self.consecutive_outside[symbol] = 0
+        elif current_price > vp.vah or current_price < vp.val:
+            # Track consecutive out-of-range checks
+            self.consecutive_outside[symbol] = (
+                self.consecutive_outside.get(symbol, 0) + 1
+            )
+
+            if self.consecutive_outside[symbol] >= 3:
+                # Check cooldown (10 minutes)
+                now = time.time()
+                last_rebuild = self.last_rebuild_time.get(symbol, 0)
+                if now - last_rebuild > 600:  # 10 min cooldown
+                    logger.info(
+                        f"[Grid] {symbol} Price {current_price:.2f} outside Value Area "
+                        f"({vp.val:.2f} - {vp.vah:.2f}) for {self.consecutive_outside[symbol]} checks. Rebuilding."
+                    )
+                    rebuild_needed = True
+                else:
+                    remaining = int(600 - (now - last_rebuild))
+                    logger.info(
+                        f"[Grid] {symbol} Rebuild on cooldown ({remaining}s remaining)"
+                    )
+            else:
+                logger.info(
+                    f"[Grid] {symbol} Price outside VA ({self.consecutive_outside[symbol]}/2 checks)"
+                )
+        else:
+            # Price is back inside Value Area, reset counter
+            self.consecutive_outside[symbol] = 0
+
+        if rebuild_needed:
+            # Logic to cancel old grid and place new one
+            equity = market_state.get("equity", 10000.0)
+            grid_budget = equity * 0.20  # 20% allocation: safer sizing for testnet
+
+            new_levels = self.generate_grid_levels(
+                symbol, vp, grid_budget, market_state
+            )
+            self.grid_states[symbol] = GridState(
+                symbol=symbol,
+                levels=new_levels,
+                poc=vp.poc,
+                vah=vp.vah,
+                val=vp.val,
+                is_active=True,
+            )
+            self.last_rebuild_time[symbol] = time.time()
+            self.consecutive_outside[symbol] = 0
+
+            # Emit signals for all new levels
+            for level in new_levels:
+                signals.append(
+                    Signal(
+                        symbol=symbol,
+                        action=SignalAction.GRID_PLACE,
+                        side=Side.LONG if level.side == "buy" else Side.SHORT,
+                        price=level.price,
+                        amount=level.amount,
+                        strategy="GridInitial",
+                        confidence=0.9,
+                    )
+                )
+            return signals
+        else:
+            # 2. Check for level crossings to "replenish" the grid
+            if state and state.levels:
+                for level in state.levels:
+                    if not level.filled:
+                        if (level.side == "buy" and current_price <= level.price) or (
+                            level.side == "sell" and current_price >= level.price
+                        ):
+                            level.filled = True
+                            logger.info(
+                                f"[Grid] {symbol} Level {level.price} ({level.side}) FILLED. Replenishing..."
+                            )
+
+                            signals.append(
+                                Signal(
+                                    symbol=symbol,
+                                    action=SignalAction.GRID_PLACE,
+                                    side=(
+                                        Side.SHORT
+                                        if level.side == "sell"
+                                        else Side.LONG
+                                    ),  # Fixed side logic too
+                                    price=level.price,
+                                    amount=level.amount,
+                                    strategy="GridReplenish",
+                                )
+                            )
+                return signals
+            return []
+
+    def reconcile_with_exchange(self, symbol: str, open_orders: List[dict]):
+        """
+        Synchronizes internal grid state with active exchange orders.
+        Detects orphaned orders and missing levels.
+        """
+        state = self.grid_states.get(symbol)
+        if not state or not state.is_active:
+            return
+
+        order_ids_on_exchange = {str(o["id"]) for o in open_orders}
+
+        for level in state.levels:
+            if level.order_id:
+                if level.order_id not in order_ids_on_exchange:
+                    if not level.filled:
+                        logger.warning(
+                            f"[Grid] {symbol} Order {level.order_id} missing on exchange but not marked filled. Resetting."
+                        )
+                        level.order_id = None
+                else:
+                    # Order still active
+                    pass
+            elif not level.filled:
+                # Level should have an order but order_id is missing (maybe failed to place)
+                pass
+
+        # Detect Orphans: orders on exchange that we don't recognize
+        recognized_ids = {str(l.order_id) for l in state.levels if l.order_id}
+        for o in open_orders:
+            oid = str(o["id"])
+            if oid not in recognized_ids:
+                logger.warning(
+                    f"[Grid] {symbol} Orphaned order detected: {oid} {o['side']} @ {o['price']}. Recommended: Manual cancel or reconstruction."
+                )
+
+    def update_order_id(self, symbol: str, price: float, order_id: str):
+        """Update the internal state with the real order ID from exchange."""
+        state = self.grid_states.get(symbol)
+        if state:
+            for level in state.levels:
+                if (
+                    abs(level.price - price) / price < 0.0001
+                ):  # Match by price proximity
+                    level.order_id = str(order_id)
+                    return

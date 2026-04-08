@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <meta name="description" content="Real-time monitoring dashboard for the Binance Futures Trading Bot">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+
+<body>
+    <div id="refresh-bar" class="refresh-bar"></div>
+
+    <div class="dashboard">
+
+        <!-- ═══ Header ═══ -->
+        <header class="header">
+            <div class="header-left">
+                <h1>Trading Bot</h1>
+                <div id="status-badge" class="status-badge offline">
+                    <span class="status-dot"></span> Loading...
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="header-meta">
+                    <div>Uptime: <strong id="uptime">--</strong></div>
+                    <div>Mode: <strong id="mode">--</strong></div>
+                    <div>Iteration: <strong id="iteration">--</strong></div>
+                    <div>Last loop: <strong id="last-loop">--</strong></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- ═══ KPI Cards ═══ -->
+        <section class="kpi-grid">
+            <div class="card kpi-card">
+                <div id="kpi-balance" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Balance</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-equity" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Equity</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-unrealized" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Unrealized PnL</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-total-pnl" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Total PnL</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-trades" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Total Trades</div>
+            </div>
+            <div class="card kpi-card">
+                <div id="kpi-winrate" class="kpi-value neutral">--</div>
+                <div class="kpi-label">Win Rate</div>
+            </div>
+        </section>
+
+        <!-- ═══ System Health ═══ -->
+        <section class="health-grid"
+            style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🤖</span> Operational Mode</div>
+                <div id="operational-status" class="health-indicators">
+                    <div class="health-item">
+                        <span>Trading:</span>
+                        <span id="op-trading" class="badge">--</span>
+                    </div>
+                    <div class="health-item">
+                        <span>Paper Mode:</span>
+                        <span id="op-paper" class="badge">--</span>
+                    </div>
+                    <div class="health-item"
+                        style="grid-column: span 2; margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px;">
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">Reason:</span>
+                        <div id="op-reason" style="font-size: 0.85rem; font-weight: 500; margin-top: 4px;">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title"><span class="icon">🏥</span> Connectivity</div>
+                <div class="health-indicators">
+                    <div class="health-item">
+                        <span>Exchange:</span>
+                        <span id="health-exchange" class="badge">--</span>
+                    </div>
+                    <div class="health-item">
+                        <span>Telegram:</span>
+                        <span id="health-telegram" class="badge">--</span>
+                    </div>
+                    <div class="health-item">
+                        <span>Loop:</span>
+                        <span id="health-loop" class="badge">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title"><span class="icon">⚠️</span> Last Error</div>
+                <div id="last-error-content" class="error-msg">
+                    <span class="empty-state">No errors reported in this session.</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Equity Chart ═══ -->
+        <section class="chart-grid">
+            <div class="card">
+                <div class="card-title"><span class="icon">📈</span> Equity Curve</div>
+                <div class="chart-container">
+                    <canvas id="equity-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Regime Info ═══ -->
+        <section style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🔄</span> Current Regime</div>
+                <div id="regime-info" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span class="empty-state">Waiting for data...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Tables ═══ -->
+        <section class="tables-grid">
+            <!-- Positions -->
+            <div class="card">
+                <div class="card-title"><span class="icon">💼</span> Open Positions</div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Avg Price</th>
+                                <th>Amount</th>
+                                <th>SL / TP</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <tr>
+                                <td colspan="5" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Pending Orders -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">📋</span> Pending Orders
+                    <span style="margin-left:auto;font-size:0.85rem;color:var(--text-muted);" id="orders-count">0</span>
+                </div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Price</th>
+                                <th>Type</th>
+                            </tr>
+                        </thead>
+                        <tbody id="orders-body">
+                            <tr>
+                                <td colspan="4" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recent Trades -->
+        <section style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🔁</span> Recent Trades</div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>PnL</th>
+                                <th>Closed At</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-body">
+                            <tr>
+                                <td colspan="4" class="empty-state">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Recent Alerts ═══ -->
+        <section style="margin-bottom: 24px;">
+            <div class="card">
+                <div class="card-title"><span class="icon">🔔</span> Recent Notifications (Telegram)</div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 15%;">Time</th>
+                                <th style="width: 15%;">Level</th>
+                                <th>Alert Description</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-body">
+                            <tr>
+                                <td colspan="3" class="empty-state">Waiting for updates...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══ Log Viewer ═══ -->
+        <section>
+            <div class="card">
+                <div class="card-title"><span class="icon">🖥️</span> Live Log</div>
+                <div id="log-viewer" class="log-viewer">
+                    <div class="log-line">Connecting...</div>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+
+</html>

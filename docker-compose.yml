@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # The Core Algorithmic Engine (Bot + Dashboard)
+  bot:
+    build: .
+    container_name: algobot_core
+    restart: unless-stopped
+    ports:
+      - "8050:8050"   # UI Dashboard Access
+      - "8000:8000"   # Prometheus Metrics Exporter Native Endpoint
+    volumes:
+      - ./data:/app/data   # SQLite State Persistence Mount
+      - ./logs:/app/logs   # JSON System Logs Extractor Mount
+      - ./.env:/app/.env   # Dynamic Environment Key Pass
+    networks:
+      - quant_network
+
+  # Time-Series Aggregation Pipeline
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: algobot_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deployment/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - quant_network
+    depends_on:
+      - bot
+
+  # Native Visualization Graphing Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: algobot_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"   # Native Grafana Access Mapping
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - quant_network
+    depends_on:
+      - prometheus
+
+networks:
+  quant_network:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:

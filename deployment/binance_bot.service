@@ -1,0 +1,17 @@
+[Unit]
+Description=Binance Hybrid Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=tradingbot
+WorkingDirectory=/home/tradingbot/binance_futures_bot
+EnvironmentFile=/home/tradingbot/binance_futures_bot/.env
+ExecStart=/home/tradingbot/binance_futures_bot/venv/bin/python -m orchestration.bot_runner
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
