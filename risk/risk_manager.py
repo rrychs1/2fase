@@ -153,20 +153,28 @@ class RiskManager:
             self.day_start_equity = float(equity)
             self.save_state()
 
-        # Monitor Drift
+        # Monitor Drift — solo disparar en CAÍDAS de equity (no en ganancias)
+        # Con abs(), una subida de +11% activaba Safe Mode igual que una pérdida.
+        # Con futuros y leverage, el equity puede crecer rápidamente: eso es normal.
         if self.last_cycle_equity > 0 and isinstance(
             self.last_cycle_equity, (int, float)
         ):
-            drift_val = abs(equity - self.last_cycle_equity) / self.last_cycle_equity
+            drift_val = (self.last_cycle_equity - equity) / self.last_cycle_equity
             if drift_val > self.drift_threshold:
                 logger.warning(
-                    f"[Risk] SIGNIFICANT EQUITY DRIFT: {drift_val*100:.2f}% "
+                    f"[Risk] SIGNIFICANT EQUITY DRIFT (loss): {drift_val*100:.2f}% "
                     f"({self.last_cycle_equity:.2f} -> {equity:.2f})"
                 )
 
                 if not self.is_safe_mode:
                     self.is_safe_mode = True
                     drift_alert = True
+            elif drift_val < 0:
+                # Subida de equity: loguear como info, nunca activar Safe Mode
+                logger.debug(
+                    f"[Risk] Equity gain detected: {abs(drift_val)*100:.2f}% "
+                    f"({self.last_cycle_equity:.2f} -> {equity:.2f})"
+                )
 
         self.last_cycle_equity = float(equity)
         return drift_alert, drift_val

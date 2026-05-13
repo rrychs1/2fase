@@ -482,26 +482,11 @@ class ExchangeClient:
         return normalized
 
     async def cancel_all_orders(self, symbol):
-        # Testnet/Demo: usar path manual (más fiable que CCXT en Demo Trading)
-        if Config.USE_TESTNET:
-            return await self._manual_cancel_all_orders(symbol)
-
-        async def _cancel():
-            clean_symbol = symbol.replace("/", "")
-            result = await self.exchange.cancel_all_orders(clean_symbol)
-            self.health.record_success()
-            return result
-
-        result = await retry_async(
-            _cancel,
-            max_retries=3,
-            base_delay=1.0,
-            default=None,
-            context=f"cancel_all_orders({symbol})",
-        )
-        if result is None:
-            self.health.record_failure()
-        return result
+        # Siempre usar el path manual (DELETE /fapi/v1/allOpenOrders).
+        # CCXT binanceusdm tiene un bug conocido en cancel_all_orders que lanza
+        # KeyError: 'option' al intentar clasificar tipos de mercado internamente.
+        # El endpoint manual es correcto para Binance Futures en todos los entornos.
+        return await self._manual_cancel_all_orders(symbol)
 
     async def _manual_cancel_all_orders(self, symbol):
         """Manual DELETE request to cancel all open orders for a symbol.
