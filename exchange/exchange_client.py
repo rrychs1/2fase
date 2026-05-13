@@ -129,6 +129,8 @@ class ExchangeClient:
             full_timeout = 30  # High timeout for Testnet slowness
             if method.upper() == "GET":
                 r = requests.get(url, headers=headers, timeout=full_timeout)
+            elif method.upper() == "DELETE":
+                r = requests.delete(url, headers=headers, timeout=full_timeout)
             else:
                 r = requests.post(url, headers=headers, timeout=full_timeout)
 
@@ -480,6 +482,10 @@ class ExchangeClient:
         return normalized
 
     async def cancel_all_orders(self, symbol):
+        # Testnet/Demo: usar path manual (más fiable que CCXT en Demo Trading)
+        if Config.USE_TESTNET:
+            return await self._manual_cancel_all_orders(symbol)
+
         async def _cancel():
             clean_symbol = symbol.replace("/", "")
             result = await self.exchange.cancel_all_orders(clean_symbol)
@@ -495,6 +501,22 @@ class ExchangeClient:
         )
         if result is None:
             self.health.record_failure()
+        return result
+
+    async def _manual_cancel_all_orders(self, symbol):
+        """Manual DELETE request to cancel all open orders for a symbol.
+        Uses /fapi/v1/allOpenOrders endpoint, consistent with Testnet/Demo Trading.
+        """
+        clean_symbol = symbol.replace("/", "")
+        result = self._manual_request(
+            "DELETE", "/fapi/v1/allOpenOrders", {"symbol": clean_symbol}
+        )
+        if result is not None:
+            self.health.record_success()
+            logger.info(f"[Exchange] Manual cancel_all_orders OK for {clean_symbol}")
+        else:
+            self.health.record_failure()
+            logger.warning(f"[Exchange] Manual cancel_all_orders FAILED for {clean_symbol}")
         return result
 
     async def fetch_positions(self):

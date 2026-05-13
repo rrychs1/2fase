@@ -68,6 +68,7 @@ class BotRunner:
         self.iteration_count = 0
         self.trades_today = 0
         self.last_summary_time = 0
+        self.boot_flag_file = os.path.join("data", ".bot_started")
 
         # Phase 22: Operational Mode Object
         self.status = {
@@ -304,13 +305,13 @@ class BotRunner:
         )
 
     async def iterate(self, target_symbol=None):
-        print(f">>> DEBUG: Start iterate target_symbol={target_symbol}")
+        logger.debug(">>> DEBUG: Start iterate target_symbol={target_symbol}")
         self.iteration_count += 1
         print(">>> DEBUG: Iteration count:", self.iteration_count)
 
         # Phase 5: Check Circuit Breaker & Alerts Health
         cb_tripped = self.circuit_breaker.is_tripped()
-        print(">>> DEBUG: Checked circuit breaker")
+        logger.debug(">>> DEBUG: Checked circuit breaker")
         if cb_tripped:
             if not self.risk_manager.is_high_caution:
                 logger.critical(f"ACTIVATING HIGH CAUTION MODE: Circuit Breaker")
@@ -330,12 +331,12 @@ class BotRunner:
 
         symbols_to_process = [target_symbol] if target_symbol else self.config.SYMBOLS
 
-        print(">>> DEBUG: About to fetch latest prices")
+        logger.debug(">>> DEBUG: About to fetch latest prices")
         # 0. Fetch latest prices to accurately estimate equity/risk
         for symbol in symbols_to_process:
             df_4h = self.data_engine.data.get((symbol, self.config.TF_GRID))
             if df_4h is None or len(df_4h) < 20:
-                print(">>> DEBUG: Falling back to fetch_ohlcv")
+                logger.debug(">>> DEBUG: Falling back to fetch_ohlcv")
                 df_4h = await self.data_engine.fetch_ohlcv(
                     symbol,
                     self.config.TF_GRID,
@@ -344,13 +345,13 @@ class BotRunner:
             if df_4h is not None and len(df_4h) > 0:
                 current_prices[symbol] = df_4h.iloc[-1]["close"]
 
-        print(">>> DEBUG: About to get equity and pnl")
+        logger.debug(">>> DEBUG: About to get equity and pnl")
         # 1. Sync Account State with accurate prices
         try:
             equity, unrealized_pnl = await self.execution_router.get_equity_and_pnl(
                 current_prices
             )
-            print(">>> DEBUG: Got equity pnl")
+            logger.debug(">>> DEBUG: Got equity pnl")
 
             equity = float(equity) if isinstance(equity, (int, float)) else 0.0
             unrealized_pnl = (
@@ -358,13 +359,13 @@ class BotRunner:
                 if isinstance(unrealized_pnl, (int, float))
                 else 0.0
             )  # Sync reference equity for the entire cycle
-            print(">>> DEBUG: Syncing reference equity")
+            logger.debug(">>> DEBUG: Syncing reference equity")
             drift_alert, drift_val = self.risk_manager.sync_reference_equity(
                 equity, unrealized_pnl
             )
             if drift_alert:
                 pass
-            print(">>> DEBUG: Done syncing reference equity")
+            logger.debug(">>> DEBUG: Done syncing reference equity")
 
             if drift_alert:
                 alert_msg = (
@@ -386,7 +387,12 @@ class BotRunner:
                     self.trend_dca.reconcile_with_exchange(s_symbol, open_orders)
 
             # 3. Global Risk Check (Kill Switch)
-            if self.risk_manager.check_daily_drawdown(unrealized_pnl, equity):
+            # Usar el cambio de equity vs inicio del día (incluye trades cerrados + posiciones abiertas)
+            # en lugar de unrealized_pnl, que solo refleja el PnL flotante de posiciones abiertas
+            # y puede superar el límite en movimientos normales de mercado con leverage.
+            day_start = self.risk_manager.day_start_equity
+            realized_daily_pnl = (equity - day_start) if day_start > 0 else unrealized_pnl
+            if self.risk_manager.check_daily_drawdown(realized_daily_pnl, equity):
                 msg = "💀 KILL SWITCH ACTIVATED: Cancelling orders and liquidating positions!"
                 logger.critical(msg)
                 bot_system_health.set(0)  # Update metrics before returning
@@ -459,17 +465,17 @@ class BotRunner:
 
             price = current_prices.get(symbol, df_4h.iloc[-1]["close"])
 
-            print(">>> DEBUG: update_positions virtual")
+            logger.debug(">>> DEBUG: update_positions virtual")
             # Update Virtual Positions (Check SL/TP and Pending Orders)
             self.execution_router.update_positions({symbol: price})
 
-            print(">>> DEBUG: Indicator calculations")
+            logger.debug(">>> DEBUG: Indicator calculations")
             # 3. Indicator Calculation
             df_4h = add_standard_indicators(df_4h)
             df_trend = add_standard_indicators(df_trend)
             vp = compute_volume_profile(df_4h)
 
-            print(">>> DEBUG: Volatility checks")
+            logger.debug(">>> DEBUG: Volatility checks")
             # Volatility Analysis
             atr_series = self.volatility_detector.calculate_atr(df_4h)
             atr_val = (
@@ -479,7 +485,7 @@ class BotRunner:
             )
             volatility_regime = self.volatility_detector.detect_regime(df_4h)
 
-            print(">>> DEBUG: Testing Transition Tolerances")
+            logger.debug(">>> DEBUG: Testing Transition Tolerances")
             # 3. Transition Tolerance (Phase 3)
             old_regime = self.current_regimes.get(symbol)
             regime = self.regime_detector.detect_regime(df_4h)
@@ -539,16 +545,16 @@ class BotRunner:
             "unrealized_pnl": unrealized_pnl,
         }
         # 4. Generate Strategy Signals
-        print(f">>> DEBUG: Start route_signals {symbol}")
+        logger.debug(">>> DEBUG: Start route_signals {symbol}")
         signals = await self.strategy_router.route_signals(symbol, regime, market_state)
-        print(f">>> DEBUG: After route_signals {symbol}")
+        logger.debug(">>> DEBUG: After route_signals {symbol}")
         self.metrics["signals_processed"] += len(signals)
 
         # Track Orders and History in Live Mode
         if self.config.EXECUTION_MODE == "LIVE":
-            print(f">>> DEBUG: Start fetch_open_orders LIVE {symbol}")
+            logger.debug(">>> DEBUG: Start fetch_open_orders LIVE {symbol}")
             symbol_orders = await self.exchange.fetch_open_orders(symbol)
-            print(f">>> DEBUG: After fetch_open_orders LIVE {symbol}")
+            logger.debug(">>> DEBUG: After fetch_open_orders LIVE {symbol}")
             self.current_orders.extend(symbol_orders)
 
             symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=100)
@@ -579,27 +585,27 @@ class BotRunner:
         # Notify for Grid Initialization (Batched)
         grid_init_signals = [s for s in signals if s.strategy == "GridInitial"]
         if signals:
-            print(">>> DEBUG: Start telegram.info (Senal detectada)")
+            logger.debug(">>> DEBUG: Start telegram.info (Senal detectada)")
             try:
                 await self.telegram.info(f"Senal Detectada")
             except Exception:
                 pass
-            print(">>> DEBUG: After telegram.info")
+            logger.debug(">>> DEBUG: After telegram.info")
 
-        print(">>> DEBUG: Checking grid_init_signals")
+        logger.debug(">>> DEBUG: Checking grid_init_signals")
         if grid_init_signals:
             now = time.time()
             last_time = self.last_grid_update.get(symbol, 0)
             if now - last_time > 300:  # 5 minute cooldown
-                print(">>> DEBUG: Start grid init telegram")
+                logger.debug(">>> DEBUG: Start grid init telegram")
                 try:
                     await self.telegram.info("Grid Iniciado")
                 except Exception:
                     pass
-                print(">>> DEBUG: After grid init telegram")
+                logger.debug(">>> DEBUG: After grid init telegram")
                 self.last_grid_update[symbol] = now
 
-        print(f">>> DEBUG: Iterating {len(signals)} Signals...")
+        logger.debug(">>> DEBUG: Iterating {len(signals)} Signals...")
         # 5. Execution Logic (Senior Hardening: Decoupled per Signal)
         for signal in signals:
             if not signal.price:
@@ -642,7 +648,7 @@ class BotRunner:
                 signal.amount = allowed_amount
 
             try:
-                print(f">>> DEBUG: Start signal checking {signal.action.value}")
+                logger.debug(">>> DEBUG: Start signal checking {signal.action.value}")
                 # Phase 21: Pre-Execution Log/Alert
                 if self.risk_manager.is_safe_mode and signal.action in [
                     SignalAction.ENTER_LONG,
@@ -655,12 +661,12 @@ class BotRunner:
                 elif self.risk_manager.is_kill_switch_active:
                     continue
 
-                print(f">>> DEBUG: Start execute_signal {signal.action.value} {symbol}")
+                logger.debug(">>> DEBUG: Start execute_signal {signal.action.value} {symbol}")
                 # EXECUTION via Router
                 order_res = await self.execution_router.execute_signal(
                     signal, neutral_grid=self.neutral_grid, trend_dca=self.trend_dca
                 )
-                print(f">>> DEBUG: After execute_signal {signal.action.value}")
+                logger.debug(">>> DEBUG: After execute_signal {signal.action.value}")
 
                 # 2. Alert & Metrics Result
                 if order_res:
@@ -721,7 +727,7 @@ class BotRunner:
         # Periodically summary
         now = time.time()
         if now - self.last_summary_time > 21600:
-            print(">>> DEBUG: Start periodic summary telegram")
+            logger.debug(">>> DEBUG: Start periodic summary telegram")
             try:
                 uptime = str(datetime.now() - self.start_time).split(".")[0]
                 await self.telegram.info(
@@ -735,16 +741,16 @@ class BotRunner:
                 )
             except Exception as e:
                 pass
-            print(">>> DEBUG: After periodic summary telegram")
+            logger.debug(">>> DEBUG: After periodic summary telegram")
             self.last_summary_time = now
 
-        print(">>> DEBUG: Start write_dashboard_state")
+        logger.debug(">>> DEBUG: Start write_dashboard_state")
         try:
             self._write_dashboard_state(equity, unrealized_pnl, current_prices)
         except Exception as e:
             pass
-        print(">>> DEBUG: After write_dashboard_state")
-        print(f">>> DEBUG: End evaluate_symbol {symbol}")
+        logger.debug(">>> DEBUG: After write_dashboard_state")
+        logger.debug(">>> DEBUG: End evaluate_symbol {symbol}")
 
     def _append_paper_record(
         self, symbol, price, regime, signals_count, virtual_equity
