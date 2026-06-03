@@ -134,12 +134,19 @@ class TestDailyDrawdownKillSwitch:
 
 class TestEquityDriftAndEdgeCases:
     def test_high_volatility_drift_safe_mode(self, rm, config):
+        """Drift safe mode only fires on equity DROPS, not gains (C-07 intentional change).
+        A 20% equity jump is normal with leverage — it must NOT trigger safe mode.
+        Use a simulated loss to verify the trigger still works."""
         config.EQUITY_DRIFT_THRESHOLD = 0.1  # 10%
         rm.sync_reference_equity(10000.0, 0.0)
 
-        # Next cycle equity jumps to 12000 (20% jump > 10% threshold)
+        # Gain of 20% should NOT trigger safe mode (leverage gains are expected)
         drift_alert, val = rm.sync_reference_equity(12000.0, 0.0)
+        assert drift_alert is False
+        assert rm.is_safe_mode is False
 
+        # Now simulate a 15% DROP from 12000 -> 10200 (> 10% threshold)
+        drift_alert, val = rm.sync_reference_equity(10200.0, 0.0)
         assert drift_alert is True
         assert rm.is_safe_mode is True
         # Blocking calculation in safe mode

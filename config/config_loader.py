@@ -83,6 +83,12 @@ class Config:
     POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", 60))
     CANDLES_ANALYSIS_LIMIT = int(os.getenv("CANDLES_ANALYSIS_LIMIT", 200))
 
+    # H-08: reconciliation interval in bot loop iterations (default 5 → every 5 min at 60s loop)
+    RECONCILE_INTERVAL = int(os.getenv("RECONCILE_INTERVAL", 5))
+
+    # L-05: circuit breaker cooldown configurable via env var (default 600s = 10 min)
+    CIRCUIT_BREAKER_COOLDOWN_SEC = int(os.getenv("CIRCUIT_BREAKER_COOLDOWN_SEC", 600))
+
     # Timeframes
     TF_GRID = os.getenv("TF_GRID", "4h")
     TF_TREND = os.getenv("TF_TREND", "1h")

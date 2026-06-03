@@ -1,53 +1,107 @@
 version: '3.8'
 
-services:
-  # The Core Algorithmic Engine (Bot + Dashboard)
-  bot:
-    build: .
-    container_name: algobot_core
-    restart: unless-stopped
-    ports:
-      - "8050:8050"   # UI Dashboard Access
-      - "8000:8000"   # Prometheus Metrics Exporter Native Endpoint
-    volumes:
-      - ./data:/app/data   # SQLite State Persistence Mount
-      - ./logs:/app/logs   # JSON System Logs Extractor Mount
-      - ./.env:/app/.env   # Dynamic Environment Key Pass
-    networks:
-      - quant_network
+# ═══════════════════════════════════════════════════════════════
+#  Binance Futures Trading Bot — Docker Compose (Production)
+# ═══════════════════════════════════════════════════════════════
+#
+#  Quick start:
+#    cp .env.example .env && nano .env
+#    docker compose up -d --build
+#
+#  Services:
+#    trading-bot   — core engine (algo + paper trading)
+#    trading-dash  — Flask dashboard (port 8000)
+#    prometheus    — metrics scraper
+#    grafana       — visualization (port 3000)
+# ═══════════════════════════════════════════════════════════════
 
-  # Time-Series Aggregation Pipeline
+services:
+
+  # ── Core algorithmic engine ─────────────────────────────────
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8050:8050"   # Dash UI (internal dashboard)
+      - "8000:8000"   # Flask dashboard / health endpoint
+    volumes:
+      - ./data:/app/data       # SQLite + state files
+      - ./logs:/app/logs       # Structured logs
+    networks:
+      - quant_net
+    mem_limit: 768m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/dashboard/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ── Prometheus — time-series scraper ────────────────────────
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.51.0
     container_name: algobot_prometheus
     restart: unless-stopped
     volumes:
-      - ./deployment/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./deployment/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
     networks:
-      - quant_network
+      - quant_net
+    mem_limit: 256m
+    cpus: "0.25"
     depends_on:
-      - bot
+      trading-bot:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
 
-  # Native Visualization Graphing Dashboard
+  # ── Grafana — visualization dashboard ───────────────────────
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:10.4.0
     container_name: algobot_grafana
     restart: unless-stopped
     ports:
-      - "3000:3000"   # Native Grafana Access Mapping
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./deployment/grafana/provisioning:/etc/grafana/provisioning:ro
     networks:
-      - quant_network
+      - quant_net
+    mem_limit: 256m
+    cpus: "0.25"
     depends_on:
       - prometheus
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
 
 networks:
-  quant_network:
+  quant_net:
     driver: bridge
 
 volumes:

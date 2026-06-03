@@ -13,12 +13,15 @@ class PaperManager:
     Persists state to virtual_account.json.
     """
 
+    MAX_HISTORY_IN_STATE = 500  # L-03: keep only the latest N trades in the state JSON
+    HISTORY_OVERFLOW_FILE = "data/papers_history.jsonl"  # L-03: overflow destination
+
     def __init__(self, initial_balance=10000.0):
         self.file_path = "virtual_account.json"
         is_new = not os.path.exists(self.file_path)
         self.state = self._load_state(initial_balance)
         if is_new:
-            self._save_state()
+            self._sync_save_state()
 
     def _load_state(self, initial_balance):
         if os.path.exists(self.file_path):
@@ -42,9 +45,22 @@ class PaperManager:
             "history": [],
         }
 
-    def _save_state(self):
+    def _sync_save_state(self):
+        """H-05: synchronous write — must be called from a thread, not the event loop."""
         with open(self.file_path, "w") as f:
             json.dump(self.state, f, indent=4)
+
+    def _save_state(self):
+        """
+        H-05: Compatibility shim for synchronous call sites (e.g. __init__).
+        Call _async_save_state() from async contexts instead.
+        """
+        self._sync_save_state()
+
+    async def _async_save_state(self):
+        """H-05: offload blocking JSON serialisation + fsync to a thread pool."""
+        import asyncio
+        await asyncio.to_thread(self._sync_save_state)
 
     def get_equity(self, current_prices: dict):
         unrealized_pnl = 0
@@ -143,6 +159,8 @@ class PaperManager:
                         "closed_at": datetime.now(UTC).isoformat(),
                     }
                 )
+                # L-03: rotate history overflow to avoid unbounded JSON growth
+                self._rotate_history_if_needed()
                 logger.info(f"[PAPER] Closed {pos['side']} on {symbol}. PnL: {pnl:.2f}")
 
         self._save_state()
@@ -246,6 +264,34 @@ class PaperManager:
 
         if keys_to_remove or orders_to_fill:
             self._save_state()
+
+    def _rotate_history_if_needed(self):
+        """
+        L-03: When the in-state history list exceeds MAX_HISTORY_IN_STATE entries,
+        flush the overflow to a JSONL file so the state JSON stays small.
+        Each _save_state() call serialises the entire history; keeping it bounded
+        prevents progressive slowdown as paper trading runs for weeks/months.
+        """
+        history = self.state.get("history", [])
+        if len(history) <= self.MAX_HISTORY_IN_STATE:
+            return
+
+        overflow = history[: len(history) - self.MAX_HISTORY_IN_STATE]
+        self.state["history"] = history[len(history) - self.MAX_HISTORY_IN_STATE :]
+
+        try:
+            os.makedirs(os.path.dirname(self.HISTORY_OVERFLOW_FILE), exist_ok=True)
+            with open(self.HISTORY_OVERFLOW_FILE, "a", encoding="utf-8") as f:
+                for record in overflow:
+                    f.write(json.dumps(record) + "\n")
+            logger.info(
+                "[PAPER] Rotated %d history record(s) to %s (state capped at %d).",
+                len(overflow),
+                self.HISTORY_OVERFLOW_FILE,
+                self.MAX_HISTORY_IN_STATE,
+            )
+        except Exception as e:
+            logger.warning("[PAPER] Failed to rotate history overflow: %s", e)
 
     def append_equity_record(self, symbol, price, regime, signals_count, equity):
         """Phase 17: Log equity data for performance tracking."""

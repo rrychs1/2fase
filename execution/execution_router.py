@@ -25,7 +25,21 @@ class ExecutionRouter:
         self.shadow_executor = ShadowExecutor()
         self.exchange = exchange_client
 
-        self.risk_engine = CoreRiskEngine(config, self.get_state_metrics)
+        # H-06: initialise live state cache so _get_live_state_metrics is safe to call
+        # before the first BotRunner equity sync populates it.
+        self._live_state_cache: dict = {"balance": 0.0, "equity": 0.0, "positions": {}}
+
+        self.risk_engine = CoreRiskEngine(
+            config,
+            self.get_state_metrics,
+            # H-06: in LIVE mode supply a live state provider so the risk engine
+            # validates against real exchange balance/positions, not paper state.
+            live_state_provider=(
+                self._get_live_state_metrics
+                if self.mode == "LIVE"
+                else None
+            ),
+        )
 
         logger.info(f"[EXEC] ExecutionRouter initialized in {self.mode} mode.")
 
@@ -156,6 +170,24 @@ class ExecutionRouter:
                 "history": self.paper_manager.state.get("history", []),
             }
 
+    def _get_live_state_metrics(self):
+        """
+        H-06: Synchronous snapshot of live exchange state for CoreRiskEngine.
+        Called from get_state() which is synchronous; we return a best-effort
+        cached view.  The live_engine.get_account_pnl / fetch_balance are async
+        so we rely on the last equity sync stored by the main bot loop via
+        set_live_state_cache().
+        """
+        return self._live_state_cache
+
+    def set_live_state_cache(self, balance: float, equity: float, positions: dict):
+        """H-06: Called by BotRunner after each equity sync to keep the cache fresh."""
+        self._live_state_cache = {
+            "balance": balance,
+            "equity": equity,
+            "positions": positions,
+        }
+
     async def get_equity_and_pnl(self, current_prices: dict):
         if self.mode == "SHADOW":
             equity = self.shadow_executor.get_equity(current_prices)
@@ -230,16 +262,24 @@ class ExecutionRouter:
             logger.warning(f"[Router] Signal for {symbol} BLOCKED: Zero Liquid Volume.")
             return None
 
-        if allowed_amount < original_amount:
-            logger.info(
-                f"[Router] Liquid Sizing {symbol}: {original_amount:.4f} -> {allowed_amount:.4f}"
-            )
-            signal.amount = allowed_amount
+        # H-07: mutate signal.amount only AFTER validation passes.
+        # Store adjusted amount temporarily; apply to signal after validate_signal.
+        adjusted_amount = allowed_amount if allowed_amount < original_amount else original_amount
 
         # Validate order constraints (e.g., Min Notional, Price Bounds)
-        signal = OrderValidator.validate_signal(signal, mid_price, self.config)
-        if not signal:
+        # Temporarily apply the adjusted amount for validation purposes
+        signal.amount = adjusted_amount
+        validated_signal = OrderValidator.validate_signal(signal, mid_price, self.config)
+        if not validated_signal:
+            # H-07: restore original amount before returning so callers aren't surprised
+            signal.amount = original_amount
             return None
+        signal = validated_signal
+
+        if adjusted_amount < original_amount:
+            logger.info(
+                f"[Router] Liquid Sizing {symbol}: {original_amount:.4f} -> {signal.amount:.4f}"
+            )
 
         if self.mode == "SHADOW":
             order_res = self.shadow_executor.execute_signal(signal)

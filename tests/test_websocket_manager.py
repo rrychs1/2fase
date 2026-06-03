@@ -1,7 +1,18 @@
+"""
+Unit tests for WebsocketManager.
+
+Design principles:
+- All queue reads use get_nowait() to avoid blocking the event loop.
+- Timestamps in test messages are always unique to avoid the dedup filter.
+- asyncio.sleep is patched at the module level to prevent real waits.
+- The ws_manager fixture is async so asyncio.Queue() is created in the test loop.
+"""
+
 import pytest
 import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
+
 from config.config_loader import Config
 from data.websocket_manager import WebsocketManager
 
@@ -14,70 +25,90 @@ class MockConfig(Config):
 
 
 @pytest.fixture
-def ws_manager():
+async def ws_manager():
+    """Async fixture — asyncio.Queue is bound to the test's own event loop."""
     return WebsocketManager(MockConfig())
 
 
+# ────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────
+
+def _kline_msg(t: int, is_closed: bool) -> str:
+    x = "true" if is_closed else "false"
+    return (
+        f'{{"e":"kline","s":"BTCUSDT","k":{{"t":{t},"i":"1m","x":{x},'
+        f'"o":"1","c":"1","h":"1","l":"1","v":"1"}}}}'
+    )
+
+
+# ────────────────────────────────────────────────────────
+# Tests
+# ────────────────────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_websocket_deduplication(ws_manager):
-    # Process first valid closed candle
-    msg1 = '{"e":"kline","E":1620000000000,"s":"BTCUSDT","k":{"t":1610000000000,"T":1610000059999,"s":"BTCUSDT","i":"1m","f":100,"L":200,"o":"50000","c":"50100","h":"50150","l":"49950","v":"100","n":100,"x":true,"q":"5000000","V":"50","Q":"2500000","B":"0"}}'
+    """A duplicate kline (same timestamp) must be dropped."""
+    msg = _kline_msg(t=1610000000000, is_closed=True)
 
-    await ws_manager._process_message(msg1)
-
+    await ws_manager._process_message(msg)
     assert ws_manager.event_queue.qsize() == 1
-    event1 = await ws_manager.event_queue.get()
-    assert event1.is_closed == True
+    event = ws_manager.event_queue.get_nowait()
+    assert event.is_closed is True
 
-    # Send duplicate (same start time 't')
-    await ws_manager._process_message(msg1)
+    # Duplicate — must be silently dropped
+    await ws_manager._process_message(msg)
     assert ws_manager.event_queue.qsize() == 0
 
 
 @pytest.mark.asyncio
 async def test_websocket_out_of_order_ignored(ws_manager):
-    # msg at 1000
-    msg_new = '{"e":"kline","s":"BTCUSDT","k":{"t":1000,"i":"1m","x":true,"o":"1","c":"1","h":"1","l":"1","v":"1"}}'
-    # msg at 900 (older)
-    msg_old = '{"e":"kline","s":"BTCUSDT","k":{"t":900,"i":"1m","x":true,"o":"1","c":"1","h":"1","l":"1","v":"1"}}'
+    """An older kline arriving after a newer one must be ignored."""
+    msg_new = _kline_msg(t=1000, is_closed=True)
+    msg_old = _kline_msg(t=900, is_closed=True)
 
     await ws_manager._process_message(msg_new)
     assert ws_manager.event_queue.qsize() == 1
-    await ws_manager.event_queue.get()
+    ws_manager.event_queue.get_nowait()
 
-    # Send older message
+    # Older timestamp — must be ignored
     await ws_manager._process_message(msg_old)
-    # Should be ignored by deduplication logic (start_time <= last_processed)
     assert ws_manager.event_queue.qsize() == 0
 
 
 @pytest.mark.asyncio
 async def test_websocket_partial_vs_closed_flag(ws_manager):
-    # Partial candle
-    msg_partial = '{"e":"kline","s":"BTCUSDT","k":{"t":1000,"i":"1m","x":false,"o":"1","c":"1","h":"1","l":"1","v":"1"}}'
-    # Closed candle
-    msg_closed = '{"e":"kline","s":"BTCUSDT","k":{"t":1000,"i":"1m","x":true,"o":"1","c":"1","h":"1","l":"1","v":"1"}}'
+    """Partial candles (x=false) are stored in latest_open, NOT enqueued.
+    Closed candles (x=true) are pushed to event_queue.
+    Uses distinct timestamps to bypass the dedup filter."""
+    msg_partial = _kline_msg(t=2000, is_closed=False)
+    msg_closed = _kline_msg(t=3000, is_closed=True)
 
+    # Partial: must go to latest_open, queue stays empty
     await ws_manager._process_message(msg_partial)
-    event = await ws_manager.event_queue.get()
-    assert event.is_closed is False
+    assert ws_manager.event_queue.qsize() == 0
+    assert "BTC/USDT_1m" in ws_manager.latest_open
+    assert ws_manager.latest_open["BTC/USDT_1m"]["timestamp"] == 2000
 
+    # Closed: must be enqueued
     await ws_manager._process_message(msg_closed)
-    event = await ws_manager.event_queue.get()
+    assert ws_manager.event_queue.qsize() == 1
+    event = ws_manager.event_queue.get_nowait()
     assert event.is_closed is True
+    assert event.timestamp == 3000
 
 
 @pytest.mark.asyncio
 async def test_websocket_heartbeat_timeout_triggers_close(ws_manager):
+    """If idle time exceeds heartbeat_timeout the socket should be closed."""
     ws_manager.is_running = True
     ws_manager.ws = AsyncMock()
     ws_manager.ws.closed = False
 
-    # Force idle time
     ws_manager.last_message_time = time.time() - 10
     ws_manager.heartbeat_timeout = 5
 
-    # Manually trigger heartbeat check logic
+    # Replicate the heartbeat check inline (no real sleep needed)
     now = time.time()
     idle_time = now - ws_manager.last_message_time
     if idle_time > ws_manager.heartbeat_timeout:
@@ -88,30 +119,32 @@ async def test_websocket_heartbeat_timeout_triggers_close(ws_manager):
 
 @pytest.mark.asyncio
 async def test_reconnect_logic_backoff(ws_manager):
+    """Exponential backoff increments correctly on each call."""
     ws_manager.is_running = True
     ws_manager.reconnect_attempts = 0
     ws_manager.max_retries = 3
 
-    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        # Simulate one reconnect trigger
+    with patch("data.websocket_manager.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         await ws_manager._handle_reconnect()
-
         assert ws_manager.reconnect_attempts == 1
-        # Backoff: 2^1 = 2s
-        mock_sleep.assert_called_with(2)
+        mock_sleep.assert_called_with(2)  # 2^1
 
-        # Another attempt
         await ws_manager._handle_reconnect()
         assert ws_manager.reconnect_attempts == 2
-        # Backoff: 2^2 = 4s
-        mock_sleep.assert_called_with(4)
+        mock_sleep.assert_called_with(4)  # 2^2
 
 
 @pytest.mark.asyncio
-async def test_max_retries_stops_manager(ws_manager):
+async def test_max_retries_resets_counter(ws_manager):
+    """After exceeding max_retries the counter resets to 0 and the manager
+    keeps retrying indefinitely (is_running stays True)."""
     ws_manager.is_running = True
     ws_manager.reconnect_attempts = 5
     ws_manager.max_retries = 5
 
-    await ws_manager._handle_reconnect()
-    assert ws_manager.is_running is False
+    with patch("data.websocket_manager.asyncio.sleep", new_callable=AsyncMock):
+        await ws_manager._handle_reconnect()
+
+    # Counter resets — manager does NOT stop
+    assert ws_manager.reconnect_attempts == 0
+    assert ws_manager.is_running is True

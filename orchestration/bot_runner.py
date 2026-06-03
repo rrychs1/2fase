@@ -49,7 +49,8 @@ class BotRunner:
         self.data_engine = data_engine or DataEngine(self.exchange)
         self.regime_detector = RegimeDetector()
         self.db = DbManager()  # Senior Audit Phase 4
-        self.circuit_breaker = CircuitBreaker()  # Senior Audit Phase 5
+        # L-05: pass config so cooldown_seconds is read from CIRCUIT_BREAKER_COOLDOWN_SEC env var
+        self.circuit_breaker = CircuitBreaker(config=self.config)
 
         self.neutral_grid = NeutralGridStrategy(self.config)
         self.trend_dca = TrendDcaStrategy(self.config)
@@ -307,7 +308,6 @@ class BotRunner:
     async def iterate(self, target_symbol=None):
         logger.debug(">>> DEBUG: Start iterate target_symbol={target_symbol}")
         self.iteration_count += 1
-        print(">>> DEBUG: Iteration count:", self.iteration_count)
 
         # Phase 5: Check Circuit Breaker & Alerts Health
         cb_tripped = self.circuit_breaker.is_tripped()
@@ -363,6 +363,16 @@ class BotRunner:
             drift_alert, drift_val = self.risk_manager.sync_reference_equity(
                 equity, unrealized_pnl
             )
+
+            # H-06: keep the live state cache fresh so CoreRiskEngine validates
+            # LIVE orders against real exchange balance/positions (not paper state).
+            if self.config.EXECUTION_MODE == "LIVE":
+                self.execution_router.set_live_state_cache(
+                    balance=equity - unrealized_pnl,
+                    equity=equity,
+                    positions=self.current_positions,
+                )
+
             if drift_alert:
                 pass
             logger.debug(">>> DEBUG: Done syncing reference equity")
@@ -438,7 +448,6 @@ class BotRunner:
             unrealized_pnl = 0.0
 
         for symbol in symbols_to_process:
-            print(">>> DEBUG: Starting inner loop for symbol", symbol)
             # 3. Update Data & Indicators
             df_4h = self.data_engine.data.get((symbol, self.config.TF_GRID))
             df_trend = self.data_engine.data.get((symbol, self.config.TF_TREND))
@@ -498,236 +507,212 @@ class BotRunner:
                 # Ensure strategies see the current orders before routing signals
                 self.neutral_grid.reconcile_with_exchange(symbol, trans_orders)
                 self.trend_dca.reconcile_with_exchange(symbol, trans_orders)
+            self.current_regimes[symbol] = regime
 
-        self.current_regimes[symbol] = regime
+            # 4. Strategy Analysis
+            position = await self.execution_router.get_position(symbol)
 
-        # 4. Strategy Analysis
-        position = await self.execution_router.get_position(symbol)
+            # Track position for dashboard
+            if position:
+                self.current_positions[symbol] = position
 
-        # Track position for dashboard
-        if position:
-            self.current_positions[symbol] = position
+            # Concise Symbol Summary
+            pos_info = "None"
+            if position:
+                pos_info = (
+                    f"{position.get('side', '')} {float(position.get('amount', 0)):.4f}"
+                )
 
-        # Concise Symbol Summary
-        pos_info = "None"
-        if position:
-            pos_info = (
-                f"{position.get('side', '')} {float(position.get('amount', 0)):.4f}"
+            # Phase 20: Explicit Block Diagnostics
+            blockers = []
+            if self.risk_manager.is_safe_mode:
+                blockers.append("SAFE MODE")
+            if self.risk_manager.is_high_caution:
+                blockers.append("HIGH CAUTION")
+            if self.risk_manager.is_kill_switch_active:
+                blockers.append("KILL SWITCH")
+            if self.config.ANALYSIS_ONLY:
+                blockers.append("PAPER ONLY")
+
+            block_msg = f" | BLOCKERS: {', '.join(blockers)}" if blockers else " | ENABLED"
+
+            # Phase 21/22: High-Level Traceability Log (Always visible)
+            logger.info(
+                f"[{symbol}] Price: {price:.2f} | Regime: {regime.upper()} | Pos: {pos_info}{block_msg}"
             )
 
-        # Phase 20: Explicit Block Diagnostics
-        blockers = []
-        if self.risk_manager.is_safe_mode:
-            blockers.append("SAFE MODE")
-        if self.risk_manager.is_high_caution:
-            blockers.append("HIGH CAUTION")
-        if self.risk_manager.is_kill_switch_active:
-            blockers.append("KILL SWITCH")
-        if self.config.ANALYSIS_ONLY:
-            blockers.append("PAPER ONLY")
+            market_state = {
+                "price": price,
+                "df": df_trend,
+                "volume_profile": vp,
+                "equity": equity,
+                "position": position,
+                "regime": regime,
+                "volatility_regime": volatility_regime,
+                "atr": atr_val,
+                "unrealized_pnl": unrealized_pnl,
+            }
+            # 4. Generate Strategy Signals
+            signals = await self.strategy_router.route_signals(symbol, regime, market_state)
+            self.metrics["signals_processed"] += len(signals)
 
-        block_msg = f" | BLOCKERS: {', '.join(blockers)}" if blockers else " | ENABLED"
+            # Track Orders and History in Live Mode
+            if self.config.EXECUTION_MODE == "LIVE":
+                symbol_orders = await self.exchange.fetch_open_orders(symbol)
+                self.current_orders.extend(symbol_orders)
 
-        # Phase 21/22: High-Level Traceability Log (Always visible)
-        logger.info(
-            f"[{symbol}] Price: {price:.2f} | Regime: {regime.upper()} | Pos: {pos_info}{block_msg}"
-        )
-
-        market_state = {
-            "price": price,
-            "df": df_trend,
-            "volume_profile": vp,
-            "equity": equity,
-            "position": position,
-            "regime": regime,
-            "volatility_regime": volatility_regime,
-            "atr": atr_val,
-            "unrealized_pnl": unrealized_pnl,
-        }
-        # 4. Generate Strategy Signals
-        logger.debug(">>> DEBUG: Start route_signals {symbol}")
-        signals = await self.strategy_router.route_signals(symbol, regime, market_state)
-        logger.debug(">>> DEBUG: After route_signals {symbol}")
-        self.metrics["signals_processed"] += len(signals)
-
-        # Track Orders and History in Live Mode
-        if self.config.EXECUTION_MODE == "LIVE":
-            logger.debug(">>> DEBUG: Start fetch_open_orders LIVE {symbol}")
-            symbol_orders = await self.exchange.fetch_open_orders(symbol)
-            logger.debug(">>> DEBUG: After fetch_open_orders LIVE {symbol}")
-            self.current_orders.extend(symbol_orders)
-
-            symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=100)
-            for trade in symbol_trades:
-                # Deduplication and Persistance
-                is_new = self.db.save_trade(trade)
-                if is_new:
-                    logger.info(
-                        f"[Bot] New Trade Recorded: {trade['id']} {trade['side']} {trade['symbol']} PnL: {trade['pnl']}"
-                    )
-                    self.current_history.append(trade)
-
-                    # Alerta de Trade Sospechoso (Phase 4)
-                    if trade.get("is_suspicious"):
-                        alert_msg = (
-                            f"🚨 **ALERTA: Trade Sospechoso Detectado**\n"
-                            f"ID: {trade['id']}\n"
-                            f"Symbol: {trade['symbol']}\n"
-                            f"PnL: 0.0 (Cierre significativo detectado)\n"
-                            f"**Acción Sugerida**: Revisar manualmente en Binance."
+                symbol_trades = await self.exchange.fetch_my_trades(symbol, limit=100)
+                for trade in symbol_trades:
+                    is_new = self.db.save_trade(trade)
+                    if is_new:
+                        logger.info(
+                            f"[Bot] New Trade Recorded: {trade['id']} {trade['side']} {trade['symbol']} PnL: {trade['pnl']}"
                         )
-                        await self.telegram.send_error_alert(alert_msg)
+                        self.current_history.append(trade)
 
-            # In-memory history for dashboard (limited)
-            if len(self.current_history) > 500:
-                self.current_history = self.current_history[-500:]
+                        if trade.get("is_suspicious"):
+                            alert_msg = (
+                                f"🚨 **ALERTA: Trade Sospechoso Detectado**\n"
+                                f"ID: {trade['id']}\n"
+                                f"Symbol: {trade['symbol']}\n"
+                                f"PnL: 0.0 (Cierre significativo detectado)\n"
+                                f"**Acción Sugerida**: Revisar manualmente en Binance."
+                            )
+                            await self.telegram.send_error_alert(alert_msg)
 
-        # Notify for Grid Initialization (Batched)
-        grid_init_signals = [s for s in signals if s.strategy == "GridInitial"]
-        if signals:
-            logger.debug(">>> DEBUG: Start telegram.info (Senal detectada)")
-            try:
-                await self.telegram.info(f"Senal Detectada")
-            except Exception:
-                pass
-            logger.debug(">>> DEBUG: After telegram.info")
+                if len(self.current_history) > 500:
+                    self.current_history = self.current_history[-500:]
 
-        logger.debug(">>> DEBUG: Checking grid_init_signals")
-        if grid_init_signals:
-            now = time.time()
-            last_time = self.last_grid_update.get(symbol, 0)
-            if now - last_time > 300:  # 5 minute cooldown
-                logger.debug(">>> DEBUG: Start grid init telegram")
+            # Notify for Grid Initialization (Batched)
+            grid_init_signals = [s for s in signals if s.strategy == "GridInitial"]
+            if signals:
                 try:
-                    await self.telegram.info("Grid Iniciado")
+                    await self.telegram.info(f"Senal Detectada")
                 except Exception:
                     pass
-                logger.debug(">>> DEBUG: After grid init telegram")
-                self.last_grid_update[symbol] = now
 
-        logger.debug(">>> DEBUG: Iterating {len(signals)} Signals...")
-        # 5. Execution Logic (Senior Hardening: Decoupled per Signal)
-        for signal in signals:
-            if not signal.price:
-                continue
+            if grid_init_signals:
+                now = time.time()
+                last_time = self.last_grid_update.get(symbol, 0)
+                if now - last_time > 300:  # 5 minute cooldown
+                    try:
+                        await self.telegram.info("Grid Iniciado")
+                    except Exception:
+                        pass
+                    self.last_grid_update[symbol] = now
 
-            # Enrich signal with amount if missing
-            if not signal.amount:
-                # Risk manager will try to calculate based on equity & risk model
-                signal.amount = self.risk_manager.calculate_position_size(
-                    symbol,
-                    signal.price,
-                    getattr(signal, "stop_loss", None),
-                    self.exchange,
+            # 5. Execution Logic (Senior Hardening: Decoupled per Signal)
+            for signal in signals:
+                if not signal.price:
+                    continue
+
+                if not signal.amount:
+                    signal.amount = self.risk_manager.calculate_position_size(
+                        symbol,
+                        signal.price,
+                        getattr(signal, "stop_loss", None),
+                        self.exchange,
+                    )
+                    if signal.amount <= 0:
+                        reason = "Size Calculation Failed (Risk Manager Blocked)"
+                        logger.warning(f"[Bot] Signal for {symbol} BLOCKED: {reason}")
+                        await self.telegram.warning(
+                            f"⚠️ **Señal Bloqueada**: {symbol}\nMotivo: `{reason}`",
+                            dedup_key=f"block_{symbol}",
+                        )
+                        continue
+
+                allowed_amount = self.risk_manager.enforce_inventory_limits(
+                    symbol, signal, self.current_positions
                 )
-                if signal.amount <= 0:
-                    # Phase 21: Diagnostic Alert for Blocked Signal
-                    reason = "Size Calculation Failed (Risk Manager Blocked)"
-                    logger.warning(f"[Bot] Signal for {symbol} BLOCKED: {reason}")
-                    await self.telegram.warning(
-                        f"⚠️ **Señal Bloqueada**: {symbol}\nMotivo: `{reason}`",
-                        dedup_key=f"block_{symbol}",
+                if allowed_amount <= 0:
+                    logger.warning(
+                        f"[Bot] Signal for {symbol} BLOCKED: Inventory limits exceeded."
                     )
                     continue
 
-            # NEW: Inventory Risk Control
-            allowed_amount = self.risk_manager.enforce_inventory_limits(
-                symbol, signal, self.current_positions
-            )
-            if allowed_amount <= 0:
-                logger.warning(
-                    f"[Bot] Signal for {symbol} BLOCKED: Inventory limits exceeded."
-                )
-                continue
+                if allowed_amount < signal.amount:
+                    logger.warning(
+                        f"[Bot] {symbol} Order size reduced from {signal.amount:.4f} to {allowed_amount:.4f} due to inventory limits."
+                    )
+                    signal.amount = allowed_amount
 
-            # Reduce size if necessary
-            if allowed_amount < signal.amount:
-                logger.warning(
-                    f"[Bot] {symbol} Order size reduced from {signal.amount:.4f} to {allowed_amount:.4f} due to inventory limits."
-                )
-                signal.amount = allowed_amount
-
-            try:
-                logger.debug(">>> DEBUG: Start signal checking {signal.action.value}")
-                # Phase 21: Pre-Execution Log/Alert
-                if self.risk_manager.is_safe_mode and signal.action in [
-                    SignalAction.ENTER_LONG,
-                    SignalAction.ENTER_SHORT,
-                    SignalAction.GRID_PLACE,
-                ]:
-                    continue
-                elif self.risk_manager.is_high_caution:
-                    continue
-                elif self.risk_manager.is_kill_switch_active:
-                    continue
-
-                logger.debug(">>> DEBUG: Start execute_signal {signal.action.value} {symbol}")
-                # EXECUTION via Router
-                order_res = await self.execution_router.execute_signal(
-                    signal, neutral_grid=self.neutral_grid, trend_dca=self.trend_dca
-                )
-                logger.debug(">>> DEBUG: After execute_signal {signal.action.value}")
-
-                # 2. Alert & Metrics Result
-                if order_res:
-                    logger.info(f"✅ [Bot] {symbol} => {signal.action.value} SUCCESS")
-                    self.metrics["orders_placed"] += 1
-                    if signal.action in [
-                        SignalAction.GRID_PLACE,
+                try:
+                    if self.risk_manager.is_safe_mode and signal.action in [
                         SignalAction.ENTER_LONG,
                         SignalAction.ENTER_SHORT,
+                        SignalAction.GRID_PLACE,
                     ]:
-                        await self.telegram.trade(
-                            symbol,
-                            signal.side.name,
-                            signal.price,
-                            signal.amount,
-                            signal.strategy,
-                        )
-                    elif signal.action in [
-                        SignalAction.EXIT_LONG,
-                        SignalAction.EXIT_SHORT,
-                    ]:
-                        await self.telegram.trade(
-                            symbol,
-                            "CLOSE",
-                            signal.price,
-                            signal.amount,
-                            f"Exit ({signal.strategy})",
-                        )
-                else:
-                    logger.error(f"❌ [Bot] {symbol} => {signal.action.value} FAILED")
-                    self.metrics["orders_failed"] += 1
-                    await self.telegram.error(
-                        f"❌ **Orden Fallida**: {symbol}\nAcción: `{signal.action.value}`"
-                    )
-            except Exception as signal_err:
-                s_type = type(signal_err).__name__
-                logger.error(
-                    f"[{symbol}] Failed to execute signal {signal.action}: {signal_err}",
-                    exc_info=True,
-                )
-                await self.telegram.warning(
-                    f"⚠️ **Fallo de Ejecución ({symbol})**\nAcción: `{signal.action.value}`\nError: `{s_type}`"
-                )
+                        continue
+                    elif self.risk_manager.is_high_caution:
+                        continue
+                    elif self.risk_manager.is_kill_switch_active:
+                        continue
 
-        # Senior Audit Phase 17: Paper Trading Logging (Safe execution)
-        if self.config.PAPER_TRADING_ENABLED:
-            try:
-                self._append_paper_record(
-                    symbol=symbol,
-                    price=price,
-                    regime=regime,
-                    signals_count=len(signals),
-                    virtual_equity=self.paper_manager.get_equity(current_prices),
-                )
-            except Exception as e:
-                logger.debug(f"Paper record skipped: {e}")
+                    order_res = await self.execution_router.execute_signal(
+                        signal, neutral_grid=self.neutral_grid, trend_dca=self.trend_dca
+                    )
+
+                    if order_res:
+                        logger.info(f"✅ [Bot] {symbol} => {signal.action.value} SUCCESS")
+                        self.metrics["orders_placed"] += 1
+                        if signal.action in [
+                            SignalAction.GRID_PLACE,
+                            SignalAction.ENTER_LONG,
+                            SignalAction.ENTER_SHORT,
+                        ]:
+                            await self.telegram.trade(
+                                symbol,
+                                signal.side.name,
+                                signal.price,
+                                signal.amount,
+                                signal.strategy,
+                            )
+                        elif signal.action in [
+                            SignalAction.EXIT_LONG,
+                            SignalAction.EXIT_SHORT,
+                        ]:
+                            await self.telegram.trade(
+                                symbol,
+                                "CLOSE",
+                                signal.price,
+                                signal.amount,
+                                f"Exit ({signal.strategy})",
+                            )
+                    else:
+                        logger.error(f"❌ [Bot] {symbol} => {signal.action.value} FAILED")
+                        self.metrics["orders_failed"] += 1
+                        await self.telegram.error(
+                            f"❌ **Orden Fallida**: {symbol}\nAcción: `{signal.action.value}`"
+                        )
+                except Exception as signal_err:
+                    s_type = type(signal_err).__name__
+                    logger.error(
+                        f"[{symbol}] Failed to execute signal {signal.action}: {signal_err}",
+                        exc_info=True,
+                    )
+                    await self.telegram.warning(
+                        f"⚠️ **Fallo de Ejecución ({symbol})**\nAcción: `{signal.action.value}`\nError: `{s_type}`"
+                    )
+
+            # Senior Audit Phase 17: Paper Trading Logging (Safe execution)
+            if self.config.PAPER_TRADING_ENABLED:
+                try:
+                    self._append_paper_record(
+                        symbol=symbol,
+                        price=price,
+                        regime=regime,
+                        signals_count=len(signals),
+                        virtual_equity=self.execution_router.get_state_metrics().get(
+                            "equity", equity
+                        ),
+                    )
+                except Exception as e:
+                    logger.debug(f"Paper record skipped: {e}")
 
         # Periodically summary
         now = time.time()
         if now - self.last_summary_time > 21600:
-            logger.debug(">>> DEBUG: Start periodic summary telegram")
             try:
                 uptime = str(datetime.now() - self.start_time).split(".")[0]
                 await self.telegram.info(
@@ -739,18 +724,14 @@ class BotRunner:
                     f"📋 Trades hoy: {self.trades_today}",
                     dedup_key="periodic_summary",
                 )
-            except Exception as e:
+            except Exception:
                 pass
-            logger.debug(">>> DEBUG: After periodic summary telegram")
             self.last_summary_time = now
 
-        logger.debug(">>> DEBUG: Start write_dashboard_state")
         try:
             self._write_dashboard_state(equity, unrealized_pnl, current_prices)
-        except Exception as e:
+        except Exception:
             pass
-        logger.debug(">>> DEBUG: After write_dashboard_state")
-        logger.debug(">>> DEBUG: End evaluate_symbol {symbol}")
 
     def _append_paper_record(
         self, symbol, price, regime, signals_count, virtual_equity

@@ -8,6 +8,7 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 24) -> VolumeProfile:
     price_max = df["high"].max()
 
     bin_edges = np.linspace(price_min, price_max, bins + 1)
+    bin_width = bin_edges[1] - bin_edges[0] if len(bin_edges) > 1 else 1.0
 
     # Calculate volume per bin
     hist, _ = np.histogram(df["close"], bins=bin_edges, weights=df["volume"])
@@ -43,6 +44,12 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 24) -> VolumeProfile:
     val = bin_edges[low_idx]
     vah = bin_edges[high_idx + 1]
 
+    # L-02: guard against degenerate value area under sparse data.
+    # If val >= vah (can happen when all volume is in a single bin), expand vah
+    # by one bin-width to ensure a non-zero value area for downstream strategies.
+    if val >= vah:
+        vah = val + bin_width
+
     return VolumeProfile(
         poc=float(poc),
         vah=float(vah),
@@ -50,3 +57,4 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 24) -> VolumeProfile:
         bins=bin_edges.tolist(),
         distribution=hist.tolist(),
     )
+

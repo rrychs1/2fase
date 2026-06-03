@@ -28,16 +28,34 @@ class WebsocketManager:
     """
     Production-grade Binance Futures Websocket Manager.
     Features: Auto-Reconnect, Exponential Backoff, Heartbeat Monitor, Data Deduplication.
+
+    Fixes applied:
+      C-01 — _connect_and_loop and _monitor_heartbeat are proper async tasks (not awaited
+              inline), so both run concurrently from the start.
+      C-02 — Combined-stream URL uses ?streams= query param; single-stream uses /ws/ path.
+              The combined-stream wrapper {"stream":..., "data":{...}} is parsed correctly.
+      C-03 — Heartbeat correctly restarts the connection because _connect_and_loop runs as
+              a task whose while-loop iterates after ConnectionClosed exits _receive_loop.
+              ws=None is set after close() to make state unambiguous.
+      C-04 — connect() creates both tasks before returning; no blocking await.
+      H-01 — Fast-path for open candles: parse k['x'] before allocating KlineEvent.
+      H-02 — Hot-path debug log uses %-style formatting (no f-string evaluated eagerly).
+      M-01 — latest_open is capped at max(64, 4 * subscription_count) entries.
+      M-02 — asyncio.CancelledError is explicitly re-raised in _connect_and_loop so task
+              cancellation works correctly on shutdown.
     """
 
     def __init__(self, config: Config):
         self.config = config
-        self.base_url = "wss://fstream.binance.com/ws/"
+
+        # C-02: base URLs differ for combined vs single stream
         if self.config.USE_TESTNET:
-            self.base_url = "wss://stream.binancefuture.com/ws/"
+            self._ws_base = "wss://stream.binancefuture.com"
+        else:
+            self._ws_base = "wss://fstream.binance.com"
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
-        self.event_queue = asyncio.Queue()
+        self.event_queue: asyncio.Queue = asyncio.Queue()
 
         self.is_running = False
         self.last_message_time = time.time()
@@ -49,11 +67,16 @@ class WebsocketManager:
         # Deduplication Tracker: {(symbol, timeframe): last_kline_close_time}
         self.last_processed_timestamps: Dict[str, int] = {}
 
-        # Streams we want to track
-        # e.g. {"btcusdt": ["15m", "4h"]}
+        # Streams we want to track — e.g. {"btcusdt": ["15m", "4h"]}
         self.subscriptions: Dict[str, List[str]] = {}
 
-        self._receive_task: Optional[asyncio.Task] = None
+        # H-01: latest open-candle data (raw dict, not KlineEvent)
+        # M-01: bounded — trimmed to _latest_open_max_size entries
+        self.latest_open: Dict[str, dict] = {}
+        self._latest_open_max_size: int = 64  # updated in connect()
+
+        # C-01 / C-04: task handles — initialised here so stop() is always safe
+        self._connect_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     def add_subscription(self, symbol: str, timeframes: List[str]):
@@ -65,32 +88,58 @@ class WebsocketManager:
             if tf not in self.subscriptions[clean_symbol]:
                 self.subscriptions[clean_symbol].append(tf)
 
+    def _build_stream_url(self, streams: List[str]) -> str:
+        """
+        C-02: Build the correct Binance Futures websocket URL.
+        - Single stream  → wss://<base>/ws/<stream>
+        - Multi stream   → wss://<base>/stream?streams=<a>/<b>/...
+        """
+        if len(streams) == 1:
+            return f"{self._ws_base}/ws/{streams[0]}"
+        return f"{self._ws_base}/stream?streams={'/'.join(streams)}"
+
     async def connect(self):
-        """Establish connection and send subscription payloads."""
+        """
+        C-04: Launch both the connect loop and heartbeat as independent tasks.
+        Returns immediately; the tasks run in the background.
+        """
         self.is_running = True
         self.reconnect_attempts = 0
-        await self._connect_and_loop()
+
+        # M-01: size the latest_open cache relative to subscription count
+        sub_count = sum(len(tfs) for tfs in self.subscriptions.values())
+        self._latest_open_max_size = max(64, 4 * sub_count)
+
+        # C-04: create tasks (never await them here)
+        if self._connect_task is None or self._connect_task.done():
+            self._connect_task = asyncio.create_task(self._connect_and_loop())
 
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(self._monitor_heartbeat())
 
     async def _connect_and_loop(self):
+        """
+        C-01: Standalone async task — runs as long as self.is_running.
+        C-04: Called via create_task, never awaited directly.
+        M-02: Re-raises CancelledError so task cancellation propagates correctly.
+        """
         while self.is_running:
             try:
-                streams = []
-                for sym, tfs in self.subscriptions.items():
-                    for tf in tfs:
-                        streams.append(f"{sym}@kline_{tf}")
+                streams = [
+                    f"{sym}@kline_{tf}"
+                    for sym, tfs in self.subscriptions.items()
+                    for tf in tfs
+                ]
 
                 if not streams:
                     logger.warning("[WS] No subscriptions defined. Pausing WS...")
                     await asyncio.sleep(5)
                     continue
 
-                # Build combined stream URL
-                stream_url = f"{self.base_url}{'/'.join(streams)}"
+                # C-02: use the correct URL format
+                stream_url = self._build_stream_url(streams)
 
-                logger.info(f"[WS] Connecting to streams: {len(streams)} active...")
+                logger.info("[WS] Connecting to %d stream(s): %s", len(streams), stream_url)
                 async with websockets.connect(
                     stream_url, ping_interval=20, ping_timeout=20
                 ) as websocket:
@@ -100,13 +149,17 @@ class WebsocketManager:
                     self.health.record_success()
                     logger.info("[WS] Connection established successfully.")
 
-                    # Blocking receive loop
+                    # Blocking receive loop — exits on ConnectionClosed
                     await self._receive_loop()
 
+            except asyncio.CancelledError:
+                # M-02: always propagate task cancellation
+                raise
             except Exception as e:
-                logger.error(f"[WS] Connection Error: {e}")
-                self.ws = None
+                logger.error("[WS] Connection Error: %s", e)
                 self.health.record_failure()
+            finally:
+                self.ws = None  # C-03: clear stale ws reference after any exit
 
             if self.is_running:
                 await self._handle_reconnect()
@@ -118,28 +171,79 @@ class WebsocketManager:
                 self.last_message_time = time.time()
                 await self._process_message(message)
         except websockets.exceptions.ConnectionClosed as e:
-            logger.warning(f"[WS] Connection Closed: {e}")
+            logger.warning("[WS] Connection Closed: %s", e)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.error(f"[WS] Receive Loop Error: {e}")
+            logger.error("[WS] Receive Loop Error: %s", e)
 
     async def _process_message(self, message: str):
-        """Parse JSON Binance payload, filter duplicates, push to Queue."""
+        """
+        Parse JSON Binance payload, filter duplicates, push closed candles to Queue.
+
+        C-02: Handles both single-stream payload  {"e": "kline", ...}
+              and combined-stream wrapper          {"stream": "...", "data": {...}}
+        H-01: Fast-path for open candles — skip KlineEvent allocation entirely.
+        H-02: Debug log uses %-style formatting.
+        M-01: latest_open trimmed to _latest_open_max_size.
+        """
         try:
             data = json.loads(message)
-            if "e" not in data or data["e"] != "kline":
-                # Unknown or non-kline payload
+
+            # C-02: unwrap combined-stream envelope if present
+            if "data" in data and "stream" in data:
+                data = data["data"]
+
+            if data.get("e") != "kline":
                 return
 
             k = data["k"]
-            symbol = data["s"]  # eg BTCUSDT
-            timeframe = k["i"]  # eg 15m
-            is_closed = k["x"]  # True if candle is finalized
+            is_closed: bool = k["x"]  # H-01: parse this FIRST, cheaply
+
+            symbol = data["s"]  # e.g. BTCUSDT
+            timeframe = k["i"]  # e.g. 15m
             start_time = int(k["t"])
 
-            # Format generic symbol
+            # Format generic symbol (BTC/USDT)
             generic_sym = symbol
             if generic_sym.endswith("USDT"):
                 generic_sym = generic_sym.replace("USDT", "/USDT")
+
+            if not is_closed:
+                # H-01: open candle — store lightweight raw dict, skip KlineEvent
+                tracker_key = f"{generic_sym}_{timeframe}"
+                self.latest_open[tracker_key] = {
+                    "symbol": generic_sym,
+                    "timeframe": timeframe,
+                    "timestamp": start_time,
+                    "open": float(k["o"]),
+                    "high": float(k["h"]),
+                    "low": float(k["l"]),
+                    "close": float(k["c"]),
+                    "volume": float(k["v"]),
+                }
+                # M-01: evict oldest entries when cache exceeds limit
+                if len(self.latest_open) > self._latest_open_max_size:
+                    oldest_key = next(iter(self.latest_open))
+                    del self.latest_open[oldest_key]
+
+                # H-02: %-style log — f-string not evaluated when log level > DEBUG
+                logger.debug(
+                    "[WS] Coalesced open kline for %s @ %s", tracker_key, start_time
+                )
+                return
+
+            # Closed candle — build full KlineEvent and deduplicate
+            tracker_key = f"{generic_sym}_{timeframe}"
+            last_processed = self.last_processed_timestamps.get(tracker_key, 0)
+
+            if start_time <= last_processed:
+                logger.debug(
+                    "[WS] Dropped Duplicate/Stale Kline: %s @ %s", tracker_key, start_time
+                )
+                return
+
+            self.last_processed_timestamps[tracker_key] = start_time
 
             event = KlineEvent(
                 symbol=generic_sym,
@@ -150,58 +254,50 @@ class WebsocketManager:
                 low=float(k["l"]),
                 close=float(k["c"]),
                 volume=float(k["v"]),
-                is_closed=is_closed,
+                is_closed=True,
             )
-
-            # Deduplication Check (Only care if it's closed)
-            if is_closed:
-                tracker_key = f"{generic_sym}_{timeframe}"
-                last_processed = self.last_processed_timestamps.get(tracker_key, 0)
-
-                if start_time <= last_processed:
-                    # Duplicate or Out-Of-Order late packet. Drop it.
-                    logger.debug(
-                        f"[WS] Dropped Duplicate/Stale Kline: {tracker_key} @ {start_time}"
-                    )
-                    return
-                else:
-                    self.last_processed_timestamps[tracker_key] = start_time
-
-            # Put in queue for asynchronous consumption by BotRunner
             await self.event_queue.put(event)
 
         except json.JSONDecodeError:
             pass
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.error(f"[WS] Error parsing message: {e}")
+            logger.error("[WS] Error parsing message: %s", e)
 
     async def _handle_reconnect(self):
         """Exponential backoff reconnect logic — never permanently gives up."""
         self.reconnect_attempts += 1
 
         if self.reconnect_attempts <= self.max_retries:
-            backoff_time = min(2**self.reconnect_attempts, 60)
+            backoff_time = min(2 ** self.reconnect_attempts, 60)
         else:
-            # Extended backoff: after exhausting initial retries, wait longer
-            # but reset the counter so we keep trying indefinitely.
             backoff_time = 120
             logger.warning(
                 "[WS] Max reconnect attempts reached. Entering extended recovery mode "
-                f"(retry every {backoff_time}s). The bot continues running."
+                "(retry every %ds). The bot continues running.",
+                backoff_time,
             )
-            self.reconnect_attempts = 0  # Reset so we keep trying
+            self.reconnect_attempts = 0  # Reset so we keep trying indefinitely
 
         logger.warning(
-            f"[WS] Reconnecting in {backoff_time}s (Attempt {self.reconnect_attempts}/{self.max_retries})..."
+            "[WS] Reconnecting in %ds (Attempt %d/%d)...",
+            backoff_time,
+            self.reconnect_attempts,
+            self.max_retries,
         )
         await asyncio.sleep(backoff_time)
 
     async def _monitor_heartbeat(self):
-        """Background watchdog to kill dead sockets."""
+        """
+        C-03: Background watchdog. After ws.close(), ConnectionClosed is raised
+        inside _receive_loop, causing _connect_and_loop's while-loop to iterate
+        and reconnect — no zombie state possible when both run as tasks.
+        """
         while self.is_running:
-            await asyncio.sleep(1)  # Check every second for better responsiveness
+            await asyncio.sleep(1)
             now = time.time()
-            # Safely check if websocket is open across websockets library versions
+
             is_ws_open = False
             if self.ws:
                 if hasattr(self.ws, "state"):
@@ -215,15 +311,33 @@ class WebsocketManager:
                 idle_time = now - self.last_message_time
                 if idle_time > self.heartbeat_timeout:
                     logger.error(
-                        f"[WS] Heartbeat timeout! No messages for {idle_time:.0f}s. Forcing reconnect..."
+                        "[WS] Heartbeat timeout! No messages for %.0fs. Forcing reconnect...",
+                        idle_time,
                     )
-                    await self.ws.close()  # This throws ConnectionClosed in recv loop, triggering reconnect
+                    # C-03: closing triggers ConnectionClosed in _receive_loop,
+                    # which causes _connect_and_loop to reconnect on its next iteration.
+                    try:
+                        await self.ws.close()
+                    except Exception:
+                        pass
+                    self.ws = None
 
     async def stop(self):
-        """Graceful shutdown."""
+        """Graceful shutdown — cancels both background tasks."""
         logger.info("[WS] Halting Websocket Manager...")
         self.is_running = False
+
         if self.ws:
-            await self.ws.close()
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+        for task in (self._connect_task, self._heartbeat_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass

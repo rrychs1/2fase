@@ -125,7 +125,23 @@ class ExecutionEngine:
         """
         FAILSAFE SYNC: Reconciles Live Exchange state against Local StateStore.
         If a severe mismatch is detected, triggers a panic halt.
+
+        C-05: Also surfaces any orders that are PENDING in the tracker (written to DB
+        before placement) and marks them FAILED so the bot won't silently block a
+        re-entry for the same symbol after a crash.
         """
+        # C-05: mark orphaned PENDINGs from previous session as FAILED
+        orphans = self.tracker.get_orphaned_pending()
+        if orphans:
+            logger.warning(
+                "[Sync] %d orphaned PENDING order(s) detected from a previous run. "
+                "Marking FAILED (exchange placement was never confirmed): %s",
+                len(orphans),
+                orphans,
+            )
+            for oid in orphans:
+                self.tracker.update_status(oid, OrderState.FAILED)
+
         if getattr(self.config, "EXECUTION_MODE", "PAPER") != "LIVE":
             return True
 

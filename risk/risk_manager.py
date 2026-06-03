@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import time
 from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
@@ -25,10 +26,13 @@ class RiskManager:
         self.is_kill_switch_active = False
         self.last_kill_switch_alert = 0.0
         self.alert_throttle_seconds = 3600  # 1 hour default
-        self.reconcile_interval = 20  # Every 20 iterations
+        # H-08: read from config so operators can tune without touching source
+        self.reconcile_interval = getattr(config, "RECONCILE_INTERVAL", 5)
         self.state_file = self.DEFAULT_STATE_FILE
         self.lock_file = self.DEFAULT_LOCK_FILE
-        self.cooldowns = {}  # Map symbol -> timestamp_end
+        self.cooldowns: dict = {}  # Map symbol -> timestamp_end (unix)
+        # C-07: track whether the hard lock file was successfully written
+        self._hard_lock_persisted: bool = False
         self.load_state()
 
     def needs_reconciliation(self, iteration_count: int) -> bool:
@@ -99,6 +103,19 @@ class RiskManager:
                 else:
                     self.last_reset_date = saved_date
 
+                # M-03: restore non-expired cooldowns
+                now = time.time()
+                saved_cooldowns = state.get("cooldowns", {})
+                self.cooldowns = {
+                    sym: end_ts
+                    for sym, end_ts in saved_cooldowns.items()
+                    if end_ts > now
+                }
+                if self.cooldowns:
+                    logger.info(
+                        f"[Risk] Restored {len(self.cooldowns)} active cooldown(s) from state."
+                    )
+
                 logger.info(
                     f"[Risk] State loaded: day_start={self.day_start_equity}, kill_switch={self.is_kill_switch_active}"
                 )
@@ -106,12 +123,14 @@ class RiskManager:
             logger.warning(f"[Risk] Failed to load state: {e}")
 
     def save_state(self):
-        """Save persistent risk state to JSON."""
+        """Save persistent risk state to JSON, including M-03 cooldowns."""
         try:
             state = {
                 "day_start_equity": self.day_start_equity,
                 "last_reset_date": self.last_reset_date.isoformat(),
                 "is_kill_switch_active": self.is_kill_switch_active,
+                # M-03: persist cooldown end-timestamps so they survive restarts
+                "cooldowns": dict(self.cooldowns),
                 "updated_at": datetime.now().isoformat(),
             }
             with open(self.state_file, "w") as f:
@@ -359,12 +378,36 @@ class RiskManager:
                 )
                 self.is_kill_switch_active = True
 
-                # Create persistent hard lock
+                # C-07: write hard lock file; treat failure as CRITICAL (soft kill-switch
+                # only survives until the next restart if the file cannot be written).
+                self._hard_lock_persisted = False
+                primary_written = False
                 try:
                     with open(self.lock_file, "w") as f:
                         f.write(date.today().isoformat())
+                    primary_written = True
+                    self._hard_lock_persisted = True
                 except Exception as e:
-                    logger.error(f"[Risk] Failed to write hard lock file: {e}")
+                    logger.error(
+                        f"[Risk] CRITICAL: Failed to write primary hard lock file '{self.lock_file}': {e}. "
+                        "Kill switch is MEMORY-ONLY and will NOT survive a restart!"
+                    )
+
+                if not primary_written:
+                    # C-07: attempt secondary fallback path
+                    fallback = self.lock_file + ".bak"
+                    try:
+                        with open(fallback, "w") as f:
+                            f.write(date.today().isoformat())
+                        self._hard_lock_persisted = True
+                        logger.warning(
+                            f"[Risk] Hard lock written to fallback path '{fallback}'."
+                        )
+                    except Exception as e2:
+                        logger.critical(
+                            f"[Risk] CRITICAL: Both lock file paths failed: {e2}. "
+                            "Restart will resume trading — IMMEDIATE OPERATOR ACTION REQUIRED."
+                        )
 
                 self.save_state()
             return True
@@ -383,10 +426,11 @@ class RiskManager:
 
     def trigger_cooldown(self, symbol: str, duration_seconds: int = 3600):
         """Manual or automatic trigger of symbol-specific trading block."""
-        import time
-
         self.cooldowns[symbol] = time.time() + duration_seconds
         logger.warning(f"[Risk] {symbol} entered COOLDOWN for {duration_seconds}s")
+        # M-03: persist immediately so cooldown survives a restart
+        self.save_state()
 
-    def enforce_leverage_and_margin(self, exchange_client, symbol):
-        exchange_client.set_leverage(symbol, self.config.LEVERAGE)
+    async def enforce_leverage_and_margin(self, exchange_client, symbol):
+        """C-06: set_leverage is async — must be awaited."""
+        await exchange_client.set_leverage(symbol, self.config.LEVERAGE)

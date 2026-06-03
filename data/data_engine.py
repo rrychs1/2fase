@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import pandas as pd
 from exchange.exchange_client import ExchangeClient
@@ -14,8 +15,6 @@ class DataEngine:
         self, symbol: str, timeframe: str, limit: int = 500
     ) -> pd.DataFrame:
         """Fetches OHLCV with retry-backoff and basic validation."""
-        import asyncio
-
         if not symbol or "/" not in symbol:
             logger.error(f"[DataEngine] Invalid symbol: {symbol}")
             return None
@@ -52,6 +51,10 @@ class DataEngine:
         """
         Appends a closed KlineEvent to the existing DataFrame.
         Maintains the DataFrame size to `limit` rows (e.g., last 500).
+
+        H-04: sort_values + drop_duplicates are CPU-bound operations that can
+        block the asyncio event loop during reconnect storms.  They are now
+        offloaded to a thread via asyncio.to_thread().
         """
         key = (event.symbol, event.timeframe)
         if key not in self.data:
@@ -76,9 +79,15 @@ class DataEngine:
             ]
         )
 
-        # Append and sort
-        df = pd.concat([df, new_row], ignore_index=True)
-        df = df.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+        # Append; then sort+dedup off the event loop (H-04)
+        combined = pd.concat([df, new_row], ignore_index=True)
+
+        def _sort_and_dedup(frame: pd.DataFrame) -> pd.DataFrame:
+            return frame.sort_values("timestamp").drop_duplicates(
+                "timestamp", keep="last"
+            )
+
+        df = await asyncio.to_thread(_sort_and_dedup, combined)
 
         # Enforce rolling window limit (e.g. 500 candles to avoid memory leak)
         config = getattr(self.exchange, "config", None)
@@ -88,3 +97,4 @@ class DataEngine:
 
         self.data[key] = df
         return df
+

@@ -152,14 +152,8 @@ class ExchangeClient:
             return None
 
     def _initialize_clients(self):
-        # Authenticated Client config
-        config = {
-            "apiKey": Config.BINANCE_API_KEY,
-            "secret": Config.BINANCE_SECRET_KEY,
-            "enableRateLimit": True,
-        }
-
-        # Adaptive Backoff State
+        # M-06: Always initialise backoff/rate-limit attrs BEFORE the sim_mode early return
+        # so that _apply_backoff() and _manual_request() never raise AttributeError in SIM mode.
         self.backoff_multiplier = 1.0
         self.last_rate_limit_hit = 0
         self.backoff_decay = 0.95  # Decay backoff by 5% each minute (approx)
@@ -169,6 +163,12 @@ class ExchangeClient:
             logger.info("SIM Mode active: Bypassing exchange client initialization.")
             return
 
+        # Authenticated Client config
+        config = {
+            "apiKey": Config.BINANCE_API_KEY,
+            "secret": Config.BINANCE_SECRET_KEY,
+            "enableRateLimit": True,
+        }
         self.exchange = ccxt.binanceusdm(config)
 
         # Public Client config
@@ -736,7 +736,13 @@ class ExchangeClient:
     async def _manual_create_order(
         self, symbol, type, side, amount, price=None, params=None
     ):
-        """Low-level signed POST request to place an order."""
+        """Low-level signed POST request to place an order.
+
+        H-09 fix: this method now signs and sends the request itself instead of
+        delegating to _manual_request, which would re-sign with a *different*
+        payload (adding its own timestamp/recvWindow), producing conflicting
+        signatures and Binance 'Signature for this request is not valid' errors.
+        """
         base_url = "https://fapi.binance.com"
         if Config.USE_TESTNET:
             base_url = "https://demo-fapi.binance.com"
@@ -768,7 +774,7 @@ class ExchangeClient:
             if "stopPrice" in payload and not payload["stopPrice"]:
                 payload["stopPrice"] = price
 
-        # Sort and sign
+        # H-09: single canonical sign — never re-signed by _manual_request
         query_string = "&".join([f"{k}={v}" for k, v in sorted(payload.items())])
         signature = hmac.new(
             self.exchange.secret.encode("utf-8"),
@@ -782,6 +788,7 @@ class ExchangeClient:
         try:
             r = requests.post(url, headers=headers, timeout=10)
             if r.status_code == 200:
+                self.last_api_success = time.time()
                 return r.json()
             else:
                 logger.error(f"Manual order failed: {r.status_code} {r.text}")

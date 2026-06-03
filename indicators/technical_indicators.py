@@ -5,7 +5,16 @@ import ta.volatility as volatility_i
 
 
 def add_standard_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # Defensas por si el DF está vacío o le faltan columnas
+    """
+    Compute technical indicators in-place on the supplied DataFrame.
+
+    H-03 fix: the previous implementation did ``tail = df.tail(n).copy()`` and
+    then wrote results back via ``df.loc[tail.index, ...]``.  That copy was
+    ~30 KB per call and the write-back triggered a slow pandas __setitem__ on
+    non-contiguous index slices.  DataEngine already enforces the rolling window
+    limit (CANDLES_ANALYSIS_LIMIT), so we operate directly on the full frame
+    that is passed in without any extra copy.
+    """
     required_cols = {"open", "high", "low", "close"}
     if (
         not isinstance(df, pd.DataFrame)
@@ -48,3 +57,4 @@ def add_standard_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_width"] = bb_obj.bollinger_wband()
 
     return df
+

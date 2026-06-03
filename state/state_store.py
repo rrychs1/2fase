@@ -95,3 +95,27 @@ class StateStore:
                     "SELECT order_id, status FROM orders WHERE status != 'FILLED' AND status != 'FAILED'"
                 )
                 return [{"order_id": row[0], "status": row[1]} for row in c.fetchall()]
+
+    def load_all_orders(self) -> dict:
+        """
+        C-05: Return {order_id: status_str} for ALL persisted orders so that
+        ExecutionTracker can re-hydrate its in-memory idempotency map on startup.
+        """
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                c = conn.cursor()
+                c.execute("SELECT order_id, status FROM orders")
+                return {row[0]: row[1] for row in c.fetchall()}
+
+    def get_order(self, order_id: str) -> dict | None:
+        """C-05: Look up a single order by ID."""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT order_id, status FROM orders WHERE order_id = ?",
+                    (order_id,),
+                )
+                row = c.fetchone()
+                return {"order_id": row[0], "status": row[1]} if row else None
+

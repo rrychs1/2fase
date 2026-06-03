@@ -34,6 +34,8 @@ virtual_account.json
 health_state.json
 .dashboard.lock
 data/*.db
+data/*.json
+data/*.jsonl
 
 # Large data files
 *.jsonl
@@ -41,13 +43,13 @@ analytics/reports/
 backtesting/data_cache/
 backtesting/reports/
 
-# Debug / temp files
-t*.txt
-*.txt
+# Debug / temp files (specific names only — *.txt NOT blanket-blocked
+# so that requirements.txt and DEPLOY.md etc. remain tracked)
 analysis_results.txt
 backtest_error.txt
 log_analysis_report.txt
 bot_output.txt
+bot_output_*.txt
 
 # OS
 .DS_Store

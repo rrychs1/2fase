@@ -6,17 +6,24 @@ logger = logging.getLogger(__name__)
 
 
 class CircuitBreaker:
-    def __init__(self, threshold=5, window_seconds=300):
+    def __init__(self, threshold=5, window_seconds=300, config=None):
         """
         threshold: Number of errors before tripping.
         window_seconds: Time window to look back for errors.
+        config: Optional Config object.  When provided, CIRCUIT_BREAKER_COOLDOWN_SEC
+                overrides the default 600-second cooldown (L-05 fix).
         """
         self.threshold = threshold
         self.window_seconds = window_seconds
         self.errors = deque()  # Stores timestamps of errors
         self.tripped = False
         self.tripped_at = 0
-        self.cooldown_seconds = 600  # 10 minutes default cooldown
+        # L-05: read from config if available so operators can tune via env var
+        self.cooldown_seconds = (
+            getattr(config, "CIRCUIT_BREAKER_COOLDOWN_SEC", 600)
+            if config is not None
+            else 600
+        )
 
     def report_error(self, error_type="exchange"):
         """Record a serious error and check if we should trip."""

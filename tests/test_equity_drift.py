@@ -33,18 +33,24 @@ async def test_equity_drift():
     assert drift_alert is False
     logger.info(f"Minor drift (4%) ignored as expected. Safe Mode: {rm.is_safe_mode}")
 
-    # 3. Major drift (10% increase)
+    # 3. Equity gain (+15%) must NOT trigger safe mode (leverage gains are legitimate)
     drift_alert, val = rm.sync_reference_equity(11500.0, 0.0)
+    assert drift_alert is False
+    assert rm.is_safe_mode is False
+    logger.info(f"Equity gain (+15%) correctly ignored. Safe Mode: {rm.is_safe_mode}")
+
+    # 4. Major DROP (>5% fall from 11500 -> 10800 = -6%) must trigger safe mode
+    drift_alert, val = rm.sync_reference_equity(10800.0, 0.0)
     assert rm.is_safe_mode is True
     assert drift_alert is True
-    logger.info(f"Major drift detected (10%). Safe Mode: {rm.is_safe_mode}")
+    logger.info(f"Major DROP detected (>5%). Safe Mode: {rm.is_safe_mode}")
 
-    # 4. Verify size calculation is blocked in Safe Mode
+    # 5. Verify size calculation is blocked in Safe Mode
     size = rm.calculate_position_size("BTC/USDT", 60000.0, 59000.0)
     assert size == 0.0
     logger.info("Size calculation blocked in Safe Mode as expected.")
 
-    # 5. Test Invalid Equity (<= 0)
+    # 6. Test Invalid Equity (<= 0)
     rm.is_safe_mode = False  # Reset
     rm.sync_reference_equity(0.0, 0.0)
     assert rm.is_safe_mode is True

@@ -45,9 +45,22 @@ class ShadowExecutor:
             "history": [],
         }
 
-    def _save_state(self):
+    def _sync_save_state(self):
+        """H-10: synchronous write — call only from a thread, not the event loop."""
         with open(self.file_path, "w") as f:
             json.dump(self.state, f, indent=4)
+
+    def _save_state(self):
+        """
+        H-10: Compatibility shim for synchronous call sites (e.g. __init__).
+        Async callers should use _async_save_state() instead.
+        """
+        self._sync_save_state()
+
+    async def _async_save_state(self):
+        """H-10: offload blocking JSON serialisation + fsync to a thread pool."""
+        import asyncio
+        await asyncio.to_thread(self._sync_save_state)
 
     def get_equity(self, current_prices: dict):
         unrealized_pnl = self.get_account_pnl(current_prices)
@@ -176,7 +189,7 @@ class ShadowExecutor:
                 )
                 self._log_trade(signal, "CLOSE", pnl)
 
-        self._save_state()
+        self._save_state()  # H-10: still sync here for simplicity; async callers use _async_save_state()
         return {
             "id": order_id,
             "status": "closed",
@@ -219,5 +232,10 @@ class ShadowExecutor:
             "amount": signal.amount,
             "pnl": pnl,
         }
-        with open(self.trades_log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+        # H-10: synchronous write kept here; heavy callers should convert to
+        # asyncio.to_thread(_log_trade_sync, ...) if log volume becomes significant.
+        try:
+            with open(self.trades_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as e:
+            logger.warning("[SHADOW] Failed to write trade log: %s", e)

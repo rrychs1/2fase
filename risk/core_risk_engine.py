@@ -5,17 +5,35 @@ logger = logging.getLogger(__name__)
 
 
 class CoreRiskEngine:
-    def __init__(self, config, portfolio_state):
+    def __init__(self, config, portfolio_state, live_state_provider=None):
         """
         Initializes the Central Risk Engine.
         :param config: The configuration object containing risk limits.
-        :param portfolio_state: A callable or dictionary representing the live state of the portfolio.
+        :param portfolio_state: A callable or dictionary representing the simulated/paper
+            state of the portfolio (used in PAPER and SHADOW modes).
+        :param live_state_provider: Optional async callable that returns real exchange state
+            (balance, positions) for LIVE mode.  When supplied, get_state() prefers it.
+            H-06 fix: without this, CoreRiskEngine validated live orders against paper state.
         """
         self.config = config
         self.portfolio_state = portfolio_state
+        self.live_state_provider = live_state_provider  # H-06
 
     def get_state(self) -> dict:
-        """Returns the dynamic state either from a callable or direct dict."""
+        """Returns the dynamic state either from a callable or direct dict.
+
+        H-06: If a live_state_provider is configured it takes priority so that
+        LIVE mode risk checks run against real exchange positions and balance.
+        """
+        if self.live_state_provider is not None:
+            try:
+                if callable(self.live_state_provider):
+                    return self.live_state_provider()
+            except Exception as e:
+                logger.error(
+                    "[RiskEngine] live_state_provider failed (%s); falling back to portfolio_state.",
+                    e,
+                )
         if callable(self.portfolio_state):
             return self.portfolio_state()
         return self.portfolio_state
@@ -150,9 +168,13 @@ class CoreRiskEngine:
                     "drawdown_pct": float(drawdown * 100),
                 },
             )
-            from monitoring.metrics import bot_system_health
-
-            bot_system_health.set(0)
+            # M-09: guard the import so a missing prometheus_client never prevents
+            # the kill switch from returning True.
+            try:
+                from monitoring.metrics import bot_system_health
+                bot_system_health.set(0)
+            except Exception:
+                pass
             return True
 
         start_balance = state.get("start_of_day_balance", balance)
@@ -170,9 +192,12 @@ class CoreRiskEngine:
                     "reason": "MaxDailyLoss",
                 },
             )
-            from monitoring.metrics import bot_system_health
-
-            bot_system_health.set(0)
+            # M-09: same guard as above
+            try:
+                from monitoring.metrics import bot_system_health
+                bot_system_health.set(0)
+            except Exception:
+                pass
             return True
 
         return False

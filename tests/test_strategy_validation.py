@@ -25,6 +25,7 @@ def mock_wfa_fail_pnl():
         "max_drawdown_pct": 15.0,
         "win_rate_pct": 20.0,
         "total_pnl": -100.0,
+        "total_return_pct": -10.0,  # needed for Fail Condition A in strategy_pipeline
     }
     trades = [{"net_pnl": -100}]
     return trades, tearsheet

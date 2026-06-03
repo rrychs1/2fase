@@ -144,7 +144,10 @@ class TestFullSystemEndToEndSimulation:
             trades_df = pd.DataFrame()
             print("[Warning] No legacy trades tracked in PaperManager.")
 
-        final_equity = getattr(bot.paper_manager, "internal_usd_balance", 10000.0)
+        _pm = getattr(bot, "paper_manager", None) or getattr(
+            bot.execution_router, "paper_manager", None
+        )
+        final_equity = getattr(_pm, "internal_usd_balance", 10000.0) if _pm else 10000.0
         total_pnl = final_equity - 10000.0
 
         print("\n================ FINAL REPORT =========================")
